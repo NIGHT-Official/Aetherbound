@@ -35,8 +35,8 @@ const emptyHud: HudSnapshot = {
   playerStunned: false,
 };
 
-const MIN_PANEL_HEIGHT = 64;
-const MAX_PANEL_HEIGHT = 440;
+const MIN_PANEL_HEIGHT = 110;
+const MAX_PANEL_HEIGHT = 320;
 
 export function SpiritWalk() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
