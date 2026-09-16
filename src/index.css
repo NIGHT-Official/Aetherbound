@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0b10;
+  --color-surface: #14151c;
+  --color-surface-2: #1c1d26;
+  --color-fg: #e8e6df;
+  --color-muted: #8a8d98;
+  --color-subtle: #5c5f6b;
+  --color-border: #2a2b34;
+  --color-accent: #c5ccd6;
+  --color-accent-fg: #0a0b10;
+  --color-danger: #c45c4a;
+  --color-ok: #7d9a7e;
+  --color-playfield: #a8dadc;
+
+  --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --motion-quick: 150ms;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+
+  body {
+    min-height: 100dvh;
+    font-family: var(--font-sans);
+  }
+}
+
+/* This ensures your custom pixel art is not blurred by the browser */
+@utility pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
