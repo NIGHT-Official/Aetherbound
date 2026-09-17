@@ -35,7 +35,7 @@ const emptyHud: HudSnapshot = {
   playerStunned: false,
 };
 
-const MIN_PANEL_HEIGHT = 130;
+const MIN_PANEL_HEIGHT = 140;
 const MAX_PANEL_HEIGHT = 320;
 
 export function SpiritWalk() {
@@ -190,7 +190,7 @@ export function SpiritWalk() {
               {hud.encounter.battle ? (
                 <>
                   {/* FLOATING ACTION LOG (ABOVE CARD) */}
-                  <div className="pointer-events-none absolute -top-24 md:-top-32 inset-x-0 flex flex-col items-center justify-end gap-1 pb-1 text-center drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]">
+                  <div className="pointer-events-none absolute -top-18 md:-top-20 inset-x-0 flex flex-col items-center justify-end gap-1 pb-1 text-center drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]">
                     {hud.encounter.battle.lines.slice(-3).map((line, idx, arr) => {
                       const isLatest = idx === arr.length - 1;
                       return (
