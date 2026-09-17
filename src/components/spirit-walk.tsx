@@ -35,7 +35,7 @@ const emptyHud: HudSnapshot = {
   playerStunned: false,
 };
 
-const MIN_PANEL_HEIGHT = 110;
+const MIN_PANEL_HEIGHT = 130;
 const MAX_PANEL_HEIGHT = 320;
 
 export function SpiritWalk() {
@@ -189,17 +189,18 @@ export function SpiritWalk() {
             >
               {hud.encounter.battle ? (
                 <>
-                  <div className="pointer-events-none absolute -top-36 inset-x-0 flex flex-col items-center justify-end gap-1.5 pb-2 text-center drop-shadow-[0_2px_10px_rgba(0,0,0,0.95)]">
-                    {hud.encounter.battle.lines.slice(-4).map((line, idx, arr) => {
+                  {/* FLOATING ACTION LOG (ABOVE CARD) */}
+                  <div className="pointer-events-none absolute -top-24 md:-top-32 inset-x-0 flex flex-col items-center justify-end gap-1 pb-1 text-center drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]">
+                    {hud.encounter.battle.lines.slice(-3).map((line, idx, arr) => {
                       const isLatest = idx === arr.length - 1;
                       return (
                         <p
                           key={`${hud.encounter!.battle!.turn}-${idx}-${line}`}
                           className={cn(
-                            "font-sans font-extrabold tracking-[0.16em] uppercase transition-all duration-200",
+                            "font-sans font-extrabold tracking-wider uppercase transition-all duration-150",
                             isLatest
-                              ? "text-2xl text-[#ff4d4d] scale-105 drop-shadow-[0_0_12px_rgba(255,77,77,0.4)]"
-                              : "text-m text-[#8a2424]"
+                              ? "text-sm sm:text-base md:text-xl text-[#ff4d4d] drop-shadow-[0_0_8px_rgba(255,77,77,0.4)]"
+                              : "text-[11px] sm:text-xs md:text-sm text-[#8a2424]"
                           )}
                         >
                           {line}
