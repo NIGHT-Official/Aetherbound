@@ -171,6 +171,7 @@ export function SpiritWalk() {
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-2 pb-2 md:flex-row md:gap-4 md:px-6 md:pb-6">
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
         {/* RESPONSIVE PLAYFIELD CANVAS */}
         <section
           ref={wrapRef}
@@ -185,7 +186,7 @@ export function SpiritWalk() {
           {/* COMBAT OVERLAY */}
           {hud.encounter ? (
             <div
-              className="absolute inset-x-3 bottom-3 z-20 mx-auto max-w-sm rounded-xl border border-border bg-surface p-4 shadow-[0_12px_40px_rgba(0,0,0,0.45)] md:inset-auto md:top-1/2 md:left-1/2 md:w-[min(92%,22rem)] md:-translate-x-1/2 md:-translate-y-1/2"
+              className="hidden absolute inset-x-3 bottom-3 z-20 mx-auto max-w-sm rounded-xl border border-border bg-surface p-4 shadow-[0_12px_40px_rgba(0,0,0,0.45)] md:block md:inset-auto md:top-1/2 md:left-1/2 md:w-[min(92%,22rem)] md:-translate-x-1/2 md:-translate-y-1/2"
             >
               {hud.encounter.battle ? (
                 <>
@@ -304,7 +305,7 @@ export function SpiritWalk() {
             </div>
           ) : hud.choice ? (
             <div
-              className="absolute inset-x-3 bottom-3 z-10 mx-auto max-w-sm rounded-xl border border-border bg-surface p-4 shadow-[0_12px_40px_rgba(0,0,0,0.45)] md:inset-auto md:top-1/2 md:left-1/2 md:w-[min(92%,22rem)] md:-translate-x-1/2 md:-translate-y-1/2"
+              className="hidden absolute inset-x-3 bottom-3 z-10 mx-auto max-w-sm rounded-xl border border-border bg-surface p-4 shadow-[0_12px_40px_rgba(0,0,0,0.45)] md:block md:inset-auto md:top-1/2 md:left-1/2 md:w-[min(92%,22rem)] md:-translate-x-1/2 md:-translate-y-1/2"
             >
               <p className="text-xs font-medium tracking-wide text-muted uppercase">This mote</p>
               <p className="mt-1 font-display text-2xl italic">Bank / Listen</p>
@@ -326,6 +327,9 @@ export function SpiritWalk() {
             </div>
           ) : null}
         </section>
+
+        <MobileCombatRail hud={hud} getGame={g} />
+        </div>
 
         {/* DRAGGABLE MOBILE RAIL / DESKTOP SIDEBAR */}
         <aside
@@ -474,5 +478,106 @@ export function SpiritWalk() {
         </button>
       </footer>
     </div>
+  );
+}
+
+interface MobileCombatRailProps {
+  hud: HudSnapshot;
+  getGame: () => SpiritGame | null;
+}
+
+function MobileCombatRail({ hud, getGame }: MobileCombatRailProps) {
+  if (!hud.encounter) return null;
+
+  const act = (action: "atk" | "eva" | "grace" | "zeal" | "stun") => {
+    getGame()?.unlockAudio();
+    getGame()?.battleAction(action);
+  };
+
+  return (
+    <section className="shrink-0 overflow-y-auto rounded-xl border border-danger/40 bg-surface px-3 py-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.3)] md:hidden">
+      {hud.encounter.battle ? (
+        <>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold tracking-[0.18em] text-danger uppercase">
+                Battle · Turn {hud.encounter.battle.turn}
+              </p>
+              <p className="truncate font-display text-xl italic text-fg">
+                {hud.encounter.battle.type}
+              </p>
+            </div>
+            <div className="w-32 shrink-0">
+              <div className="flex justify-end font-mono text-xs tabular-nums text-fg">
+                {hud.encounter.battle.enemyHp}/{hud.encounter.battle.enemyMax}
+              </div>
+              <div className="mt-1 h-2 overflow-hidden rounded-full bg-surface-2">
+                <div
+                  className="h-full bg-danger transition-[width] duration-200"
+                  style={{ width: `${Math.min(100, (hud.encounter.battle.enemyHp / hud.encounter.battle.enemyMax) * 100)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <p className="mt-1.5 truncate text-[11px] text-muted">
+            {hud.encounter.battle.lines.at(-1)}
+          </p>
+
+          <div className="mt-2 grid grid-cols-4 gap-1.5">
+            <Button size="sm" className="h-10 px-1 text-[11px]" onClick={() => act("atk")}>
+              <Swords /> Attack
+            </Button>
+            <Button size="sm" variant="outline" className="h-10 px-1 text-[11px]" onClick={() => act("eva")}>
+              <Shield /> Evade
+            </Button>
+            <Button size="sm" variant="outline" className="h-10 px-1 text-[11px]" onClick={() => act("grace")}>
+              <Wand2 /> Grace
+            </Button>
+            <Button size="sm" variant="outline" className="h-10 px-1 text-[11px]" onClick={() => act("zeal")}>
+              <Wand2 /> Zeal
+            </Button>
+          </div>
+
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <div className="flex gap-2 text-[10px] font-mono uppercase tracking-wide text-muted">
+              {hud.graceTurns > 0 && <span className="text-ok">Grace {hud.graceTurns}</span>}
+              {hud.zealTurns > 0 && <span className="text-accent">Zeal {hud.zealTurns}</span>}
+              {hud.playerStunned && <span className="text-danger">Stunned</span>}
+            </div>
+            {hud.encounter.battle.charging !== null && hud.zealTurns > 0 && (
+              <Button size="sm" variant="danger" className="h-8 px-2 text-[10px]" onClick={() => act("stun")}>
+                <Swords /> Stun
+              </Button>
+            )}
+            <Button size="sm" variant="danger" className="h-8 px-3 text-[10px]" onClick={() => {
+              getGame()?.unlockAudio();
+              getGame()?.runEncounter();
+            }}>
+              Run
+            </Button>
+          </div>
+        </>
+      ) : (
+        <div className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-bold tracking-[0.18em] text-danger uppercase">Encounter</p>
+            <p className="font-display text-lg italic text-fg">A hostile mote blocks the path</p>
+          </div>
+          <Button size="sm" className="h-10 px-3" onClick={() => {
+            getGame()?.unlockAudio();
+            getGame()?.fightEncounter();
+          }}>
+            <Swords /> Fight
+          </Button>
+          <Button size="sm" variant="danger" className="h-10 px-3" onClick={() => {
+            getGame()?.unlockAudio();
+            getGame()?.runEncounter();
+          }}>
+            Run
+          </Button>
+        </div>
+      )}
+    </section>
   );
 }
