@@ -1448,11 +1448,12 @@ export class SpiritGame {
     const sheet = type === "brute" ? this.bruteImg : type === "wraith" ? this.wraithImg : this.shadeImg;
     if (!sheet) return;
 
+    const yOffset = type === "brute" ? 10 : 0;
     const frameCount = Math.max(1, Math.floor(sheet.width / PUP_CELL));
     const frame = Math.floor(this.time * 6) % frameCount;
     const dw = PUP_CELL * PUP_SCALE;
     const dx = WORLD_W * 0.68 - dw / 2;
-    const dy = GROUND_Y - dw;
+    const dy = GROUND_Y - dw + 45 + yOffset;
 
     ctx.save();
     ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, dx, dy, dw, dw);
