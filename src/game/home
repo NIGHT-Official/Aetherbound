@@ -1,0 +1,43 @@
+export type BowlState = 'full' | 'pouring' | 'empty';
+
+export interface Bowl {
+  state: BowlState;
+  x: number;
+  y: number;
+  pourTimer: number; // seconds remaining in the eating animation
+}
+
+const EATING_DURATION_SEC = 1.5; // matches the old Godot hold time
+
+export function createBowl(x: number, y: number): Bowl {
+  return { state: 'empty', x, y, pourTimer: 0 };
+}
+
+/** Called by the feed interaction (bag-shake) — the ONLY way a bowl refills. */
+export function refillBowl(bowl: Bowl) {
+  bowl.state = 'full';
+  bowl.pourTimer = 0;
+}
+
+/**
+ * Called by the pup when it starts eating. Returns false (and does nothing)
+ * if the bowl isn't actually full — callers should already be checking
+ * bowl.state before this, but this guards against a stale call.
+ */
+export function startEating(bowl: Bowl): boolean {
+  if (bowl.state !== 'full') return false;
+  bowl.state = 'pouring';
+  bowl.pourTimer = EATING_DURATION_SEC;
+  return true;
+}
+
+/** Call once per frame. Fires onFinished() the moment eating completes. */
+export function tickBowl(bowl: Bowl, dt: number, onFinished: () => void) {
+  if (bowl.state !== 'pouring') return;
+  bowl.pourTimer -= dt;
+  if (bowl.pourTimer <= 0) {
+    bowl.state = 'empty';
+    bowl.pourTimer = 0;
+    onFinished();
+  }
+}

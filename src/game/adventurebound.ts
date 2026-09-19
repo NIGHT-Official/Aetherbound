@@ -174,7 +174,6 @@ export interface BattleState {
   isGassed: boolean;
   charging: "crush" | "blight" | null;
   flurryBlocked: boolean;
-  sprActiveTurns: number;
   pendingBlock: number;
   lines: string[];
 }
@@ -338,15 +337,44 @@ function parseBankQueue(raw: unknown, legacyCount: unknown): DropKind[][] {
     return raw
       .map((entry) => {
         if (!Array.isArray(entry)) return [] as DropKind[];
-        return entry.filter((d): d is DropKind =>
-          DROP_KINDS.includes(d as DropKind),
-        );
+        return entry.filter(isDropKind);
       })
       .slice(0, 999);
   }
   const n = clampInt(legacyCount, 0, 999, 0);
   return Array.from({ length: n }, () => ["energy"] as DropKind[]);
 }
+
+function isDropKind(value: unknown): value is DropKind {
+  return typeof value === "string" && DROP_KINDS.includes(value as DropKind);
+}
+function isTravelerKind(value: unknown): value is TravelerKind {
+  return value === "mote" || value === "encounter";
+}
+
+function parseTravelers(raw: unknown): Traveler[] {
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .filter((value): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null,
+    )
+    .map((value): Traveler => ({
+      id: clampInt(value.id, 1, Number.MAX_SAFE_INTEGER, nextId()),
+      kind: isTravelerKind(value.kind) ? value.kind : "mote",
+      x: Number(value.x),
+      y: Number(value.y),
+      w: clampInt(value.w, 1, 100, 10),
+      h: clampInt(value.h, 1, 100, 10),
+      alive: Boolean(value.alive),
+      hit: Boolean(value.hit),
+      drops: Array.isArray(value.drops)
+        ? value.drops.filter(isDropKind)
+        : [],
+    }));
+}
+
+
 
 // ---------------------------------------------------------------------------
 // 6. Procedural Audio (Web Audio API)
@@ -444,6 +472,7 @@ export class SpiritGame {
   
   private lastSave = "";
   private saveAcc = 0;
+  private choiceHudAcc = 0;
   
   // We will configure these in Chunk 5
   bgImg: HTMLImageElement | null = null;
@@ -501,19 +530,20 @@ export class SpiritGame {
     
     // 1. Roll archetype (33% chance each)
     const roll = Math.random();
+    const levelBonus = Math.max(0, this.level -1) * 10; // slightly scale enemy HP with player level
     let type: "shade" | "brute" | "wraith";
     let maxHp: number;
 
     // 2. Assign HP using your existing rollStep5 utility and design notes
     if (roll < 0.33) {
       type = "shade";
-      maxHp = rollStep5(30, 50); 
+      maxHp  = rollStep5(45 + levelBonus, 75 + levelBonus); 
     } else if (roll < 0.66) {
       type = "brute";
-      maxHp = rollStep5(90, 140);
+      maxHp = rollStep5(90 + levelBonus, 140 + levelBonus);
     } else {
       type = "wraith";
-      maxHp = rollStep5(55, 85);
+      maxHp = rollStep5(55 + levelBonus, 85 + levelBonus);
     }
 
     // 3. Boot up the state machine
@@ -527,7 +557,6 @@ export class SpiritGame {
       isGassed: false,
       charging: null,
       flurryBlocked: false,
-      sprActiveTurns: 0,
       pendingBlock: 0,
       lines: [`Encountered a ${type.toUpperCase()}!`]
     };
@@ -776,22 +805,30 @@ export class SpiritGame {
 
   private winBattle() {
     const loot = this.encounter?.loot ?? [];
-    this.pushLog(`Won the fight — +${XP_FIGHT} XP`);
-    
     const earnedXp = scaledXp(XP_FIGHT, this.level);
-    this.pushLog(`Won the fight — +${earnedXp} XP`);
+    
+    this.pushLog(`Won the fight — +${XP_FIGHT} XP`);
     this.addXp(earnedXp);
     
     const payload = loot.filter((d) => d !== "encounter");
     this.bankQueue.push(payload);
-    
     this.pushLog("Banked the mote");
-    if (this.encounter) {
-        this.encounter = null;
-        this.resumeStashedMotes();
+
+    const encounter = this.encounter;
+    const nextLoot = encounter?.queuedLoot.shift();
+
+    if (nextLoot && encounter) {
+      encounter.loot = nextLoot;
+      encounter.queued = encounter.queuedLoot.length;
+      encounter.battle = null;
+      this.pushLog("Another encounter approaches.");
+    } else {
+      this.encounter = null;
+      this.resumeStashedMotes();
     }
-    this.hudDirty = true;
-  }
+
+  this.hudDirty = true;
+}
 
   runEncounter() {
     if (!this.encounter) return;
@@ -959,8 +996,9 @@ export class SpiritGame {
       this.spendEnergy = Boolean(data.spendEnergy) && this.energy > 0;
 
       //Added for traveler save data-----------------------------------------------------
-      this.travelers = Array.isArray(data.travelers) ? data.travelers : [];
-      this.spawnTimer = typeof data.spawnTimer === "number" ? data.spawnTimer : 0;
+      this.travelers = parseTravelers(data.travelers);
+      this.spawnTimer = typeof data.spawnTimer === "number" && Number.isFinite(data.spawnTimer) 
+      ? Math.max(0, Math.min(data.spawnTimer, SPAWN_INTERVAL_FREE)) : 0;
 
       this.lastSave = raw;
       return true;
@@ -980,6 +1018,7 @@ export class SpiritGame {
     this.echoes = 0;
     this.spawnTimer = 0;
     this.drainAcc = 0;
+    this.choiceHudAcc = 0;
     this.regenAcc = 0;
     this.worldOffset = 0;
     this.choice = null;
@@ -1009,12 +1048,26 @@ export class SpiritGame {
     const step = Math.min(dt, 0.1);
     this.time += step;
 
+    // Auto-save every 1 second
+    this.saveAcc += step;
+    if (this.saveAcc >= 1) {
+      this.saveAcc = 0;
+      this.persistNow();
+    }
+
     // Handle Choice Timer Countdown
     if (this.choice && !this.encounter) {
-      this.choice.remaining -= step;
-      if (this.choice.remaining <= 0) this.resolveChoice("auto");
-      else this.hudDirty = true;
-    }
+  this.choice.remaining -= step;
+  this.choiceHudAcc += step;
+
+  if (this.choice.remaining <= 0) {
+    this.choiceHudAcc = 0;
+    this.resolveChoice("auto");
+  } else if (this.choiceHudAcc >= 0.25) {
+    this.choiceHudAcc -= 0.25;
+    this.hudDirty = true;
+  }
+}
 
     // Handle Camp Regeneration
     if (!this.adventure) {
@@ -1044,14 +1097,6 @@ export class SpiritGame {
             this.pushLog("Energy depleted — spend off. Free spawn rate.");
           }
         }
-
-    // Auto-save every 1 second
-    this.saveAcc += step;
-    if (this.saveAcc >= 1) {
-      this.saveAcc = 0;
-      this.persistNow();
-    }
-
       }
 
       const dx = SCROLL_SPEED * step;
@@ -1158,6 +1203,7 @@ export class SpiritGame {
 
   private resolveChoice(kind: "bank" | "listen" | "auto") {
     if (!this.choice) return;
+    this.choiceHudAcc = 0;
     const current = [...this.choice.payload];
     const rest = this.choice.queued.map((d) => [...d]);
     
@@ -1175,6 +1221,7 @@ export class SpiritGame {
     } else {
       this.choice = null;
     }
+    this.choiceHudAcc = 0;
     this.hudDirty = true;
   }
 
@@ -1230,7 +1277,7 @@ export class SpiritGame {
       //If we overcapped, turn it into XP
       if (overflowHp > 0) {
         this.addXp(overflowHp);
-        this.floatText(PLAYER_X + 24, floatY, '+${overflowHp} XP (overflow)');
+        this.floatText(PLAYER_X + 24, floatY, `+${overflowHp} XP (overflow)`);
         floatY -= 18;
       }
     }
@@ -1269,6 +1316,7 @@ export class SpiritGame {
     if (!this.stashedChoice) return;
     this.choice = { remaining: CHOICE_WINDOW_SEC, payload: [...this.stashedChoice.payload], queued: this.stashedChoice.queued.map((d) => [...d]) };
     this.stashedChoice = null;
+    this.choiceHudAcc = 0;
     this.pushLog("Mote acquired — Bank or Listen");
   }
 
