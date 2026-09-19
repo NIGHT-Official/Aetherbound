@@ -478,6 +478,9 @@ export class SpiritGame {
   bgImg: HTMLImageElement | null = null;
   walkImg: HTMLImageElement | null = null;
   idleImg: HTMLImageElement | null = null;
+  bruteImg: HTMLImageElement | null = null;
+  wraithImg: HTMLImageElement | null = null;
+  shadeImg: HTMLImageElement | null = null;
 
   readonly stars: Star[] = [];
   readonly stones: Prop[] = [];
@@ -1383,6 +1386,7 @@ export class SpiritGame {
     
     this.drawWorld(ctx);
     this.drawTravelers(ctx);
+    this.drawEnemy(ctx);
     this.drawPup(ctx);
     this.drawEcho(ctx);
     this.drawParticles(ctx);
@@ -1482,6 +1486,25 @@ export class SpiritGame {
     ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, -dw / 2, -dw / 2, dw, dw);
     
     // 6. Restore the canvas back to normal for the next frame
+    ctx.restore();
+  }
+
+  private drawEnemy(ctx: CanvasRenderingContext2D) {
+    const type = this.encounter?.battle?.type;
+    if (!type) return;
+
+    const sheet = type === "brute" ? this.bruteImg : type === "wraith" ? this.wraithImg : this.shadeImg;
+    if (!sheet) return;
+
+    const yOffset = type === "brute" ? 10 : 0;
+    const frameCount = Math.max(1, Math.floor(sheet.width / PUP_CELL));
+    const frame = Math.floor(this.time * 6) % frameCount;
+    const dw = PUP_CELL * PUP_SCALE;
+    const dx = WORLD_W * 0.68 - dw / 2;
+    const dy = GROUND_Y - dw + 45 + yOffset;
+
+    ctx.save();
+    ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, dx, dy, dw, dw);
     ctx.restore();
   }
 
@@ -1595,8 +1618,10 @@ export class SpiritGame {
       });
     return Promise.all([
       load("/sprites/background.png"), load("/sprites/pup-walk.png"), load("/sprites/pup-idle.png"),
-    ]).then(([bg, walk, idle]) => {
+      load("/sprites/Brute.png"), load("/sprites/Wraith.png"), load("/sprites/Shade.png"),
+    ]).then(([bg, walk, idle, brute, wraith, shade]) => {
       this.bgImg = bg; this.walkImg = walk; this.idleImg = idle;
+      this.bruteImg = brute; this.wraithImg = wraith; this.shadeImg = shade;
       this.spritesReady = true; this.hudDirty = true;
     });
   }
