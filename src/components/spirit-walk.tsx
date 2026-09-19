@@ -1,4 +1,4 @@
-import { Archive, Ear, Play, Shield, Square, Swords, Wand2 } from "lucide-react";
+import { Archive, Ear, Home, Play, Shield, Square, Swords, Wand2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -38,7 +38,7 @@ const emptyHud: HudSnapshot = {
 const MIN_PANEL_HEIGHT = 140;
 const MAX_PANEL_HEIGHT = 320;
 
-export function SpiritWalk() {
+export function SpiritWalk({ onGoHome }: { onGoHome: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<SpiritGame | null>(null);
@@ -154,6 +154,7 @@ export function SpiritWalk() {
 
   const g = () => gameRef.current;
 
+
   return (
     <div className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg select-none">
       <header className="flex shrink-0 items-center justify-between gap-4 px-4 py-2 md:py-3 md:px-6">
@@ -165,6 +166,9 @@ export function SpiritWalk() {
             Aetherbound
           </h1>
         </div>
+        <button onClick={onGoHome} aria-label="Home">
+          <Home />
+        </button>
         <p className="hidden max-w-xs text-right text-xs leading-relaxed text-muted sm:block">
           Walk in place. Motes ride the scroll. Bank them, or listen.
         </p>
