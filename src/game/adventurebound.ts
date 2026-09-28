@@ -15,6 +15,8 @@ export const ENERGY_DRAIN_AMOUNT = 1;
 export const REGEN_PERIOD_SEC = 2.0;
 export const REGEN_ENERGY_AMOUNT = 2;
 export const REGEN_HP_CAMP = 3;
+export const REGEN_BUFF_DURATION_MS = 5 * 60 * 1000; // 5 real-world minutes
+
 
 export const ENERGY_CAP = 250;
 export const ENERGY_START = 250;
@@ -76,33 +78,33 @@ export const PICKUP_RADIUS = 40;
 //------------------------------------------------------------------------------
 
 export function xpNeededFor(level: number): number {
-    return Math.max(100, Math.round(100 * Math.pow(Math.max(1, level), 1.4)));
+  return Math.max(100, Math.round(100 * Math.pow(Math.max(1, level), 1.4)));
 }
 
 export function scaledXp(baseXp: number, level: number): number {
-    return Math.round(baseXp * Math.pow(Math.max(1, level), 0.5));
+  return Math.round(baseXp * Math.pow(Math.max(1, level), 0.5));
 }
 
 export function hpMaxFor(level: number) {
-    return HP_BASE + Math.max(0, level - 1) * HP_PER_LEVEL;
+  return HP_BASE + Math.max(0, level - 1) * HP_PER_LEVEL;
 }
 
 export function agilityFor(level: number) {
-    return STAT_BASE + Math.max(0, level - 1) * STAT_PER_LEVEL;
+  return STAT_BASE + Math.max(0, level - 1) * STAT_PER_LEVEL;
 }
 
 export function spiritFor(level: number) {
-    return STAT_BASE + Math.max(0, level - 1) * STAT_PER_LEVEL;
+  return STAT_BASE + Math.max(0, level - 1) * STAT_PER_LEVEL;
 }
 
 export function atkRangeFor(level: number) {
-    const bonus = Math.max(0, level - 1) * ATK_PER_LEVEL;
-    return { min: ATK_DMG_MIN + bonus, max: ATK_DMG_MAX + bonus };
+  const bonus = Math.max(0, level - 1) * ATK_PER_LEVEL;
+  return { min: ATK_DMG_MIN + bonus, max: ATK_DMG_MAX + bonus };
 }
 
 export function rollStep5(min: number, max: number) {
-    const steps = Math.floor((max - min) / 5) + 1;
-    return min + 5 * Math.floor(Math.random() * steps);
+  const steps = Math.floor((max - min) / 5) + 1;
+  return min + 5 * Math.floor(Math.random() * steps);
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +198,7 @@ export interface HudSnapshot {
   agility: number;
   spirit: number;
   spendEnergy: boolean;
+  regenBuffRemainingMs: number;
   draining: boolean;
   spawnInterval: number;
   banked: number;
@@ -258,7 +261,7 @@ function nextId() {
  * A deterministic Random Number Generator. 
  * This ensures predictable generation if you ever want to save/share map "seeds".
  */
-function mulberry32(seed: number) {
+export function mulberry32(seed: number) {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;
@@ -299,7 +302,7 @@ function pickUniqueDrops(count: number): DropKind[] {
   ];
   const n = Math.min(count, pool.length);
   const out: DropKind[] = [];
-  
+
   for (let i = 0; i < n; i++) {
     const total = pool.reduce((sum, p) => sum + p.w, 0);
     let r = Math.random() * total;
@@ -320,7 +323,7 @@ function pickUniqueDrops(count: number): DropKind[] {
 function rollMoteDrops(forceEncounter = false): DropKind[] {
   const count = Math.random() < LISTEN_P_TRIPLE ? 3 : 2;
   const drops = pickUniqueDrops(count);
-  
+
   if (forceEncounter && !drops.includes("encounter")) {
     if (drops.length >= 3) drops[drops.length - 1] = "encounter";
     else drops.push("encounter");
@@ -400,12 +403,12 @@ export class Sfx {
     const t0 = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
-    
+
     osc.type = type;
     osc.frequency.value = freq;
     g.gain.setValueAtTime(gain, t0);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    
+
     osc.connect(g);
     g.connect(this.ctx.destination);
     osc.start(t0);
@@ -419,8 +422,8 @@ export class Sfx {
   heal() { this.tone(523, 0.12, "sine", 0.05); this.tone(784, 0.18, "triangle", 0.04); }
   hurt() { this.tone(160, 0.16, "sawtooth", 0.04); }
   atk() { this.tone(220, 0.08, "square", 0.04); this.tone(440, 0.12, "sawtooth", 0.035); }
-  eva() { this.tone(196, 0.14, "triangle", 0.05); } 
-  spr() { this.tone(523, 0.18, "sine", 0.05); this.tone(784, 0.28, "triangle", 0.035); } 
+  eva() { this.tone(196, 0.14, "triangle", 0.05); }
+  spr() { this.tone(523, 0.18, "sine", 0.05); this.tone(784, 0.28, "triangle", 0.035); }
   level() { this.tone(660, 0.12, "sine", 0.05); this.tone(880, 0.2, "triangle", 0.045); this.tone(1320, 0.24, "sine", 0.03); }
   echo() { this.tone(392, 0.28, "sine", 0.05); this.tone(588, 0.4, "triangle", 0.04); }
   encounter() { this.tone(180, 0.22, "sawtooth", 0.04); }
@@ -449,6 +452,9 @@ export class SpiritGame {
   spawnTimer = 0;
   drainAcc = 0;
   regenAcc = 0;
+  regenBuffUntil = 0; // epoch ms; 0 (or any past timestamp) means no active buff
+  private buffRegenAcc = 0;
+  private buffHudAcc = 0;
   worldOffset = 0;
   time = 0;
   travelers: Traveler[] = [];
@@ -469,11 +475,11 @@ export class SpiritGame {
   hudDirty = true;
   reducedMotion = false;
   spritesReady = false;
-  
+
   private lastSave = "";
   private saveAcc = 0;
   private choiceHudAcc = 0;
-  
+
   // We will configure these in Chunk 5
   bgImg: HTMLImageElement | null = null;
   walkImg: HTMLImageElement | null = null;
@@ -510,8 +516,8 @@ export class SpiritGame {
     for (let i = 0; i < PARTICLE_CAP; i++) {
       this.particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, size: 2, color: "#d8d6cc", alive: false });
     }
-    
-   const restored = this.loadSave();
+
+    const restored = this.loadSave();
     this.pushLog(restored ? "Save restored." : "Ready. Start an adventure to walk.");
   }
 
@@ -530,17 +536,17 @@ export class SpiritGame {
   // --- Combat Logic ------------------------------------
   fightEncounter() {
     if (!this.encounter || this.encounter.battle) return;
-    
+
     // 1. Roll archetype (33% chance each)
     const roll = Math.random();
-    const levelBonus = Math.max(0, this.level -1) * 10; // slightly scale enemy HP with player level
+    const levelBonus = Math.max(0, this.level - 1) * 10; // slightly scale enemy HP with player level
     let type: "shade" | "brute" | "wraith";
     let maxHp: number;
 
     // 2. Assign HP using your existing rollStep5 utility and design notes
     if (roll < 0.33) {
       type = "shade";
-      maxHp  = rollStep5(45 + levelBonus, 75 + levelBonus); 
+      maxHp = rollStep5(45 + levelBonus, 75 + levelBonus);
     } else if (roll < 0.66) {
       type = "brute";
       maxHp = rollStep5(90 + levelBonus, 140 + levelBonus);
@@ -605,17 +611,17 @@ export class SpiritGame {
     if (battle.isVeiled) {
       this.sfx.eva();
       this.battleLine(battle, `ATK missed! The Shade is in the Veil.`);
-      return; 
+      return;
     }
 
     const range = atkRangeFor(this.level);
     let dmg = rollStep5(range.min, range.max);
-    
+
     // 1. Zeal Buff (+50% DMG output)
     if (this.zealTurns > 0) {
       dmg = Math.floor(dmg * 1.5);
     }
-    
+
     // 2. Enemy Shroud Mitigation (-50% DMG taken)
     if (battle.shroudTurns > 0) {
       dmg = Math.floor(dmg * 0.5);
@@ -625,7 +631,7 @@ export class SpiritGame {
     if (battle.isGassed) {
       dmg = Math.floor(dmg * 1.25);
     }
-    
+
     battle.enemyHp = Math.max(0, battle.enemyHp - dmg);
     this.sfx.atk();
     this.floatText(PLAYER_X + 48, PLAYER_Y - 36, `-${dmg}`);
@@ -639,17 +645,17 @@ export class SpiritGame {
     const minBlock = 0.20 + (0.15 * factor);
     const maxBlock = 0.50 + (0.35 * factor);
     const mitigatePct = minBlock + Math.random() * (maxBlock - minBlock);
-    
+
     // Storing this lets the enemy AI know you are prepared for telegraphed strikes
-    battle.pendingBlock = mitigatePct; 
-    
+    battle.pendingBlock = mitigatePct;
+
     this.sfx.eva();
     this.battleLine(battle, `EVA — Glancing Stance prepared`);
   }
 
   private resolveGrace(battle: BattleState) {
     this.graceTurns = 2;
-    this.sfx.spr(); 
+    this.sfx.spr();
     this.battleLine(battle, `GRACE — Defense buffed for 2 turns`);
   }
 
@@ -663,11 +669,11 @@ export class SpiritGame {
     this.zealTurns = 0; // The stun consumes the player's Zeal
     battle.charging = null; // Immediately shatter the enemy's cast
     battle.shroudTurns = 0; // Strip defensive buffs
-    
+
     // To skip the enemy's execution turn, we force their state loop to Phase 5 (Recover)
-    battle.turn = 5; 
-    
-    this.sfx.atk(); 
+    battle.turn = 5;
+
+    this.sfx.atk();
     this.shake = 0.4;
     this.battleLine(battle, `STUN — The enemy's concentration is shattered!`);
   }
@@ -685,10 +691,10 @@ export class SpiritGame {
     // Clear one-turn flags before the enemy calculates its new move
     battle.isVeiled = false;
     battle.isGassed = false;
-    
+
     // --- PHASE 3: THE ENEMY BRAIN ---
     switch (battle.type) {
-      
+
       case "shade": {
         const sTurn = (battle.turn - 1) % 3 + 1; // Loops: 1, 2, 3
         if (sTurn === 1) {
@@ -746,7 +752,7 @@ export class SpiritGame {
           battle.charging = "blight";
           actionText = "Dark energy surges! Wraith channels Blight!";
         } else if (wTurn === 4) {
-          hit = rollStep5(50, 70); 
+          hit = rollStep5(50, 70);
           isTelegraphedStrike = true;
           actionText = "Wraith unleashes BLIGHT!";
           battle.charging = null;
@@ -759,7 +765,7 @@ export class SpiritGame {
     }
 
     // --- PHASE 4: DEFENSE & DAMAGE PIPELINE ---
-    const mitigatePct = battle.pendingBlock; 
+    const mitigatePct = battle.pendingBlock;
     battle.pendingBlock = 0; // Reset so block doesn't carry over
     let taken = 0;
 
@@ -772,8 +778,8 @@ export class SpiritGame {
         // Standard evasion mitigation & Grace flat block
         if (mitigatePct > 0) hit = Math.floor(hit * (1 - mitigatePct));
         if (this.graceTurns > 0) {
-           const graceBlock = Math.floor(15 * Math.pow(this.level, 0.5));
-           hit = Math.max(0, hit - graceBlock);
+          const graceBlock = Math.floor(15 * Math.pow(this.level, 0.5));
+          hit = Math.max(0, hit - graceBlock);
         }
         taken = Math.max(1, hit); // Minimum 1 chip damage if attack connected
       }
@@ -781,7 +787,7 @@ export class SpiritGame {
 
     // Output what the enemy did
     this.battleLine(battle, actionText);
-    
+
     // Apply damage to player
     if (taken > 0) {
       this.hp = Math.max(0, this.hp - taken);
@@ -789,15 +795,15 @@ export class SpiritGame {
       this.shake = this.reducedMotion ? 0 : 0.4;
       this.battleLine(battle, `Took ${taken} damage.`);
     } else if (hit === 0 && actionText !== "") {
-       // Utility cast (no damage), skip damage log and hurt sound
+      // Utility cast (no damage), skip damage log and hurt sound
     } else {
       this.sfx.eva();
     }
-    
+
     // Advance the loop
     battle.turn += 1;
     this.hudDirty = true;
-    
+
     // Death Check
     if (this.hp <= 0) {
       this.encounter = null;
@@ -809,10 +815,10 @@ export class SpiritGame {
   private winBattle() {
     const loot = this.encounter?.loot ?? [];
     const earnedXp = scaledXp(XP_FIGHT, this.level);
-    
+
     this.pushLog(`Won the fight — +${XP_FIGHT} XP`);
     this.addXp(earnedXp);
-    
+
     const payload = loot.filter((d) => d !== "encounter");
     this.bankQueue.push(payload);
     this.pushLog("Banked the mote");
@@ -830,8 +836,8 @@ export class SpiritGame {
       this.resumeStashedMotes();
     }
 
-  this.hudDirty = true;
-}
+    this.hudDirty = true;
+  }
 
   runEncounter() {
     if (!this.encounter) return;
@@ -869,13 +875,13 @@ export class SpiritGame {
     }
     this.hudDirty = true;
   }
- 
+
   // --- Mote Spawning & Collision ---------------------------------------
   private spawnTraveler(forceEncounter = false) {
     const drops = rollMoteDrops(forceEncounter);
     const hostile = drops.includes("encounter");
     let t = this.travelers.find((x) => !x.alive);
-    
+
     if (!t) {
       t = {
         id: nextId(),
@@ -885,14 +891,14 @@ export class SpiritGame {
       };
       this.travelers.push(t);
     }
-    
+
     t.id = nextId();
     t.kind = hostile ? "encounter" : "mote";
     t.drops = drops;
     t.alive = true;
     t.hit = false;
     t.x = WORLD_W + 18; // Spawn just off the right edge of the screen
-    
+
     if (hostile) {
       t.w = 16; t.h = 16; t.y = PLAYER_Y - 8;
     } else {
@@ -907,9 +913,9 @@ export class SpiritGame {
     const dx = cx - PLAYER_X;
     const dy = cy - PLAYER_Y;
     const r = PICKUP_RADIUS + t.w * 0.5;
-    
+
     if (dx * dx + dy * dy > r * r) return; // If outside radius, ignore
-    
+
     t.hit = true;
     t.alive = false;
     this.acquireMote(t, cx, cy);
@@ -919,17 +925,17 @@ export class SpiritGame {
     this.sfx.pickup();
     const hostile = t.drops.includes("encounter");
     this.burst(x, y, 14, hostile ? "#c45c4a" : "#dfe3ea");
-    
+
     const earnedXp = scaledXp(XP_MOTE, this.level);
     this.addXp(earnedXp);
-    
+
     if (hostile) {
       this.shake = this.reducedMotion ? 0 : 0.55;
       this.beginEncounter(lootFrom(t.drops));
       this.pushLog("Red mote — fight · +15 XP");
       return;
     }
-    
+
     if (this.encounter) {
       if (this.stashedChoice) {
         this.stashedChoice.queued.push([...t.drops]);
@@ -940,7 +946,7 @@ export class SpiritGame {
       this.hudDirty = true;
       return;
     }
-    
+
     if (this.choice) {
       this.choice.queued.push([...t.drops]);
       this.pushLog("Mote queued for choice · +15 XP");
@@ -951,7 +957,7 @@ export class SpiritGame {
     this.hudDirty = true;
   }
 
-// --- Persistence & Saving ---------------------------------------------
+  // --- Persistence & Saving ---------------------------------------------
   persistNow() {
     if (typeof window === "undefined") return;
     const payload = JSON.stringify({
@@ -965,7 +971,8 @@ export class SpiritGame {
       spendEnergy: this.spendEnergy,
       //Added for traveler save data------------------------------------------------
       travelers: this.travelers,
-      spawnTimer: this.spawnTimer
+      spawnTimer: this.spawnTimer,
+      regenBuffUntil: this.regenBuffUntil,
     });
     if (payload === this.lastSave) return; // Prevent unnecessary writes
     this.lastSave = payload;
@@ -982,13 +989,13 @@ export class SpiritGame {
       const raw = window.localStorage.getItem(SAVE_KEY);
       if (!raw) return false;
       const data = JSON.parse(raw) as {
-        v?: number; energy?: number; hp?: number; level?: number;
+        v?: number; energy?: number; hp?: number; level?: number; regenBuffUntil?: number;
         xp?: number; banked?: number; bankQueue?: unknown; echoes?: number; spendEnergy?: boolean;
         travelers?: Traveler[]; spawnTimer?: number;
       };
-      
+
       if (data.v !== 1 && data.v !== SAVE_VERSION) return false; // Version mismatch
-      
+
       this.level = clampInt(data.level, 1, 99, 1);
       const maxHp = hpMaxFor(this.level);
       this.energy = clampInt(data.energy, 0, ENERGY_CAP, ENERGY_START);
@@ -997,11 +1004,12 @@ export class SpiritGame {
       this.bankQueue = parseBankQueue(data.bankQueue, data.banked);
       this.echoes = clampInt(data.echoes, 0, 999, 0);
       this.spendEnergy = Boolean(data.spendEnergy) && this.energy > 0;
+      this.regenBuffUntil = typeof data.regenBuffUntil === "number" ? data.regenBuffUntil : 0;
 
       //Added for traveler save data-----------------------------------------------------
       this.travelers = parseTravelers(data.travelers);
-      this.spawnTimer = typeof data.spawnTimer === "number" && Number.isFinite(data.spawnTimer) 
-      ? Math.max(0, Math.min(data.spawnTimer, SPAWN_INTERVAL_FREE)) : 0;
+      this.spawnTimer = typeof data.spawnTimer === "number" && Number.isFinite(data.spawnTimer)
+        ? Math.max(0, Math.min(data.spawnTimer, SPAWN_INTERVAL_FREE)) : 0;
 
       this.lastSave = raw;
       return true;
@@ -1036,7 +1044,7 @@ export class SpiritGame {
     for (const p of this.particles) p.alive = false;
     this.log = [];
     this.lastSave = "";
-    
+
     if (typeof window !== "undefined") {
       try {
         window.localStorage.removeItem(SAVE_KEY);
@@ -1060,17 +1068,31 @@ export class SpiritGame {
 
     // Handle Choice Timer Countdown
     if (this.choice && !this.encounter) {
-  this.choice.remaining -= step;
-  this.choiceHudAcc += step;
+      this.choice.remaining -= step;
+      this.choiceHudAcc += step;
 
-  if (this.choice.remaining <= 0) {
-    this.choiceHudAcc = 0;
-    this.resolveChoice("auto");
-  } else if (this.choiceHudAcc >= 0.25) {
-    this.choiceHudAcc -= 0.25;
-    this.hudDirty = true;
-  }
-}
+      if (this.choice.remaining <= 0) {
+        this.choiceHudAcc = 0;
+        this.resolveChoice("auto");
+      } else if (this.choiceHudAcc >= 0.25) {
+        this.choiceHudAcc -= 0.25;
+        this.hudDirty = true;
+      }
+    }
+
+    this.tickEnergyRegenBuff(step);
+
+    // Keep the on-screen buff countdown live even when energy is already capped
+    if (Date.now() < this.regenBuffUntil) {
+      this.buffHudAcc += step;
+      if (this.buffHudAcc >= 0.25) {
+        this.buffHudAcc -= 0.25;
+        this.hudDirty = true;
+      }
+    } else {
+      this.buffHudAcc = 0;
+    }
+
 
     // Handle Camp Regeneration
     if (!this.adventure) {
@@ -1082,7 +1104,7 @@ export class SpiritGame {
       this.worldOffset += SCROLL_SPEED * step;
       this.spawnTimer += step;
       const interval = this.spawnInterval;
-      
+
       while (this.spawnTimer >= interval) {
         this.spawnTimer -= interval;
         this.spawnTraveler();
@@ -1164,8 +1186,26 @@ export class SpiritGame {
     }
   }
 
+  private tickEnergyRegenBuff(step: number) {
+    const buffed = Date.now() < this.regenBuffUntil;
+    if (this.encounter || !buffed) {
+      this.buffRegenAcc = 0;
+      return;
+    }
+    this.buffRegenAcc += step;
+    while (this.buffRegenAcc >= REGEN_PERIOD_SEC) {
+      this.buffRegenAcc -= REGEN_PERIOD_SEC;
+      if (this.energy < ENERGY_CAP) {
+        this.energy = Math.min(ENERGY_CAP, this.energy + REGEN_ENERGY_AMOUNT);
+        this.hudDirty = true;
+      }
+    }
+  }
+
+
+
   // --- State Interactions ---------------------------------------
- setAdventure(on: boolean) {
+  setAdventure(on: boolean) {
     if (this.encounter) {
       this.pushLog("Cannot make camp during battle!");
       return;
@@ -1182,6 +1222,15 @@ export class SpiritGame {
     this.hudDirty = true;
   }
 
+  applyEnergyRegenBuff(): boolean {
+    if (this.adventure) return false; // shouldn't happen — Home always makes camp first — but don't trust that blindly
+    this.regenBuffUntil = Date.now() + REGEN_BUFF_DURATION_MS;
+    this.pushLog("Well fed — energy regen boosted.");
+    this.hudDirty = true;
+    return true;
+  }
+
+
   toggleSpend() {
     if (this.spendEnergy) {
       this.spendEnergy = false;
@@ -1195,7 +1244,7 @@ export class SpiritGame {
     }
     this.hudDirty = true;
   }
-  
+
   chooseBank() { if (!this.encounter) this.resolveChoice("bank"); }
   chooseListen() { if (!this.encounter) this.resolveChoice("listen"); }
   listenFromBank() {
@@ -1209,7 +1258,7 @@ export class SpiritGame {
     this.choiceHudAcc = 0;
     const current = [...this.choice.payload];
     const rest = this.choice.queued.map((d) => [...d]);
-    
+
     if (kind === "listen") {
       this.choice = null;
       this.applyDrops(current, "on pickup");
@@ -1218,7 +1267,7 @@ export class SpiritGame {
       this.sfx.bank();
       this.pushLog(kind === "auto" ? "Auto-banked a mote" : "Banked a mote");
     }
-    
+
     if (rest.length > 0) {
       this.choice = { remaining: CHOICE_WINDOW_SEC, payload: rest[0], queued: rest.slice(1) };
     } else {
@@ -1244,7 +1293,7 @@ export class SpiritGame {
 
     if (payload.includes("energy")) {
       const amt = LISTEN_ENERGY_MIN + Math.floor(Math.random() * (LISTEN_ENERGY_MAX - LISTEN_ENERGY_MIN + 1));
-      
+
       //Calculate the overflow BEFORE applying the cap
       const missingEnergy = ENERGY_CAP - this.energy;
       const overflowEnergy = Math.max(0, amt - missingEnergy);
@@ -1260,7 +1309,7 @@ export class SpiritGame {
         this.addXp(overflowEnergy);
         this.floatText(PLAYER_X + 24, floatY, `+${overflowEnergy} XP (overflow)`);
         floatY -= 18;
-      }  
+      }
     }
 
     if (payload.includes("health")) {
@@ -1269,7 +1318,7 @@ export class SpiritGame {
 
       //Calculate the overflow BEFORE applying the cap
       const missingHp = this.hpMax - this.hp;
-      const overflowHp = Math.max(0, amt - missingHp);  
+      const overflowHp = Math.max(0, amt - missingHp);
 
       this.hp = Math.min(maxHp, this.hp + amt);
       this.sfx.heal();
@@ -1383,7 +1432,7 @@ export class SpiritGame {
     ctx.save();
     ctx.translate(ox, oy);
     ctx.imageSmoothingEnabled = false; // Keeps pixel art crisp
-    
+
     this.drawWorld(ctx);
     this.drawTravelers(ctx);
     this.drawEnemy(ctx);
@@ -1419,7 +1468,7 @@ export class SpiritGame {
       const cx = t.x + t.w / 2;
       const cy = t.y + t.h / 2;
       const hostile = t.drops.includes("encounter");
-      
+
       if (!hostile) {
         // Draw standard mote (Silver/White)
         const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 16);
@@ -1475,16 +1524,16 @@ export class SpiritGame {
 
     // 2. Isolate the canvas state so we don't accidentally flip the whole world
     ctx.save();
-    
+
     // 3. Move the canvas origin point to the exact geometric center of the pup
     ctx.translate(dx + dw / 2, dy + dw / 2);
-    
+
     // 4. Invert the X-axis (this creates the mirror effect)
     ctx.scale(-1, 1);
-    
+
     // 5. Draw the image relative to our new inverted center point
     ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, -dw / 2, -dw / 2, dw, dw);
-    
+
     // 6. Restore the canvas back to normal for the next frame
     ctx.restore();
   }
@@ -1513,7 +1562,7 @@ export class SpiritGame {
     const u = this.echoFx.t / 1.35;
     let radius: number;
     let alpha: number;
-    
+
     if (u < 0.22) {
       const k = u / 0.22;
       radius = 10 + k * 38;
@@ -1526,7 +1575,7 @@ export class SpiritGame {
       radius = 48 * (1 - k) * (1 - k) + 4;
       alpha = 1 - k;
     }
-    
+
     const { x, y } = this.echoFx;
     ctx.save();
     ctx.globalAlpha = Math.max(0, alpha);
@@ -1580,8 +1629,8 @@ export class SpiritGame {
   // --- Snapshot Exports for React UI ----------------------------------
   getHud(): HudSnapshot {
     return {
-      adventure: this.adventure, energy: this.energy, hp: this.hp, hpMax: this.hpMax,
-      level: this.level, xp: this.xp, xpNeeded: xpNeededFor(this.level),
+      adventure: this.adventure, energy: this.energy, regenBuffRemainingMs: Math.max(0, this.regenBuffUntil - Date.now()),
+      hp: this.hp, hpMax: this.hpMax, level: this.level, xp: this.xp, xpNeeded: xpNeededFor(this.level),
       agility: this.agility, spirit: this.spirit, spendEnergy: this.spendEnergy,
       draining: this.draining, spawnInterval: this.spawnInterval, banked: this.banked,
       choice: this.choice ? { remaining: this.choice.remaining, payload: [...this.choice.payload], queued: this.choice.queued.map((d) => [...d]) } : null,
