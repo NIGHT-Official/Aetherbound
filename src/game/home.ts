@@ -1,4 +1,4 @@
-import { PUP_CELL, PUP_CENTER_X, PUP_FEET_Y } from "@/game/adventurebound";
+import { mulberry32, PUP_CELL, PUP_CENTER_X, PUP_FEET_Y } from "@/game/adventurebound";
 
 export type BowlState = 'full' | 'pouring' | 'empty';
 
@@ -54,6 +54,9 @@ const HOME_PUP_SCALE = 3;
 const BAG_FRAME_W = 34;
 const BAG_FRAME_H = 41;
 const BAG_SCALE = 1.2;
+const HOME_SAVE_KEY = "aetherbound-home-save";
+const HOME_SAVE_VERSION = 1;
+
 
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -70,7 +73,8 @@ export interface PupState {
   x: number;
   y: number;
   hunger: number;          // 0-100
-  wanderDir: { x: number; y: number };
+  wanderDir: { x: number; y: number }; 
+  homestyle: number;
   decisionTimer: number;
   facingRight: boolean;    // replaces Godot's flip_h
   anim: 'idle' | 'walk' | 'eating';
@@ -103,7 +107,8 @@ export function createPup(x: number, y: number): PupState {
     anim: 'idle',
     isEating: false,
     waitTimer: 0,   // seconds spent standing at the wait spot
-    gaveUp: false     // true once he's tired of waiting; cleared after he eats
+    gaveUp: false,     // true once he's tired of waiting; cleared after he eats
+    homestyle: 0
   };
 }
 
@@ -310,6 +315,294 @@ export function updateFoodBag(
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
+//-------------------------------------------------------------------
+
+export type WallStyle = 'indigo' | 'sage';
+export type FloorStyle = 'walnut-plank' | 'ash-plank';
+export type TrimStyle = 'white' | 'dark-wood';
+
+export interface HomeStyle {
+  wall: WallStyle;
+  floor: FloorStyle;
+  trim: TrimStyle;
+  windowFrame: WindowFrameStyle;
+  outside: OutsideStyle;
+}
+
+// Split point and trim height as fractions of HOME_H, not fixed pixels —
+// "canvas size" here means the 360x640 ROOM space (HOME_W/HOME_H), not the
+// real on-screen pixel canvas. home-screen.tsx already transforms room space
+// to actual pixels before draw() ever runs, so drawing code never touches
+// device pixels or DPR directly.
+const WALL_SPLIT_RATIO = 300 / 640; // preserves the original art's wall/floor line
+const TRIM_HEIGHT_RATIO = 12 / 640;
+
+function wallSplitY(): number {
+  return Math.round(HOME_H * WALL_SPLIT_RATIO);
+}
+
+function trimHeight(): number {
+  return Math.round(Math.min(14, Math.max(10, HOME_H * TRIM_HEIGHT_RATIO)));
+}
+
+const WALL_COLORS: Record<WallStyle, string> = {
+  indigo: '#241266',
+  sage: '#2f3b2a',
+};
+
+// Two colors per floor style, kept close together on purpose — per-plank
+// jitter (see drawPlank) supplies the visual interest, not big color bands.
+const FLOOR_PALETTES: Record<FloorStyle, [string, string]> = {
+  'walnut-plank': ['#3a2415', '#2f1d10'],
+  'ash-plank': ['#5c5044', '#4c4239'],
+};
+
+const TRIM_COLORS: Record<TrimStyle, { highlight: string; body: string; shadow: string }> = {
+  white: { highlight: '#ffffff', body: '#e8e4da', shadow: '#a8a396' },
+  'dark-wood': { highlight: '#5c4530', body: '#3a2a1c', shadow: '#221810' },
+};
+
+// --- Small color-math helpers (no library — a few lines is cheaper) --------
+
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const c = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+/** amt in [-1, 1]: negative darkens toward black, positive lightens toward white. */
+function shade(hex: string, amt: number): string {
+  const [r, g, b] = hexToRgb(hex);
+  const mix = (ch: number) => ch + (amt > 0 ? 255 - ch : ch) * amt;
+  return rgbToHex(mix(r), mix(g), mix(b));
+}
+
+function blend(hexA: string, hexB: string, t: number): string {
+  const [r1, g1, b1] = hexToRgb(hexA);
+  const [r2, g2, b2] = hexToRgb(hexB);
+  return rgbToHex(r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t);
+}
+
+/** Turns a style name into a stable RNG seed, so the same style always looks the same. */
+function hashStyle(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h || 1;
+}
+
+// --- Floor texture: built once per style, cached, drawn scaled-up ----------
+
+const FLOOR_PIXEL_SCALE = 3; // render at 1/3 resolution, scale up crisply → chunky pixel-art planks
+const PLANK_ROW_H = 6;       // low-res px per plank row
+const PLANK_W = 20;
+
+function drawPlank(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+  palette: [string, string], rng: () => number
+) {
+  if (w <= 0 || h <= 0) return;
+  const [colorA, colorB] = palette;
+  const base = rng() < 0.5 ? colorA : colorB;
+  const plankColor = shade(base, (rng() - 0.5) * 0.08); // ±4% lightness jitter
+
+  ctx.fillStyle = plankColor;
+  ctx.fillRect(x, y, w, h);
+
+  ctx.fillStyle = shade(plankColor, 0.18);   // top highlight
+  ctx.fillRect(x, y, w, 1);
+
+  ctx.fillStyle = shade(plankColor, -0.25);  // seam: right edge + bottom edge
+  ctx.fillRect(x + w - 1, y, 1, h);
+  ctx.fillRect(x, y + h - 1, w, 1);
+
+  if (w > 3 && rng() < 0.35) {                // sparse grain streak
+    const gx = x + 1 + Math.floor(rng() * (w - 2));
+    const gLen = Math.min(h - 2, 1 + Math.floor(rng() * 2));
+    ctx.fillStyle = shade(plankColor, -0.12);
+    ctx.fillRect(gx, y + 1, 1, Math.max(1, gLen));
+  }
+  if (w > 5 && rng() < 0.03) {                       // rarer than before (8% → 3%)
+    const knotSize = 2 + Math.floor(rng());       // 2-3 low-res px
+    const kx = x + 1 + Math.floor(rng() * Math.max(1, w - knotSize - 1));
+    const ky = y + Math.max(0, Math.floor((h - knotSize) / 2));
+    ctx.fillStyle = shade(plankColor, -0.3);
+    ctx.fillRect(kx, ky, knotSize, knotSize);
+  }
+
+}
+
+function applyWallShadow(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const shadowH = Math.max(2, Math.round(h * 0.12));
+  const grad = ctx.createLinearGradient(0, 0, 0, shadowH);
+  grad.addColorStop(0, 'rgba(0,0,0,0.35)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, shadowH);
+}
+
+function buildFloorTexture(style: FloorStyle, lowW: number, lowH: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = lowW;
+  canvas.height = lowH;
+  const tctx = canvas.getContext('2d');
+  if (!tctx) return canvas; // extremely unlikely; drawImage of a blank canvas is a harmless no-op
+
+  const palette = FLOOR_PALETTES[style];
+  const rng = mulberry32(hashStyle(style)); // same seed every load → same floor every load
+
+  tctx.fillStyle = blend(palette[0], palette[1], 0.5);
+  tctx.fillRect(0, 0, lowW, lowH);
+
+  for (let rowY = 0, row = 0; rowY < lowH; rowY += PLANK_ROW_H, row++) {
+    const rowH = Math.min(PLANK_ROW_H, lowH - rowY);
+    let x = row % 2 === 0 ? 0 : -Math.floor(PLANK_W / 2); // stagger = brick coursing
+    while (x < lowW) {
+      const plankW = PLANK_W;
+      const segStart = Math.max(x, 0);
+      const segEnd = Math.min(x + plankW, lowW);
+      if (segEnd > segStart) drawPlank(tctx, segStart, rowY, segEnd - segStart, rowH, palette, rng);
+      x += plankW;
+    }
+  }
+
+  applyWallShadow(tctx, lowW, lowH);
+  return canvas;
+}
+
+let floorCache: { style: FloorStyle; width: number; height: number; canvas: HTMLCanvasElement } | null = null;
+
+function getFloorTexture(style: FloorStyle, floorH: number): HTMLCanvasElement {
+  const lowW = Math.ceil(HOME_W / FLOOR_PIXEL_SCALE);
+  const lowH = Math.ceil(floorH / FLOOR_PIXEL_SCALE);
+  if (floorCache && floorCache.style === style && floorCache.width === lowW && floorCache.height === lowH) {
+    return floorCache.canvas;
+  }
+  const canvas = buildFloorTexture(style, lowW, lowH);
+  floorCache = { style, width: lowW, height: lowH, canvas };
+  return canvas;
+}
+
+// --- The three draw functions ----------------------------------------------
+
+function drawWall(ctx: CanvasRenderingContext2D, style: WallStyle, splitY: number) {
+  ctx.fillStyle = WALL_COLORS[style];
+  ctx.fillRect(0, 0, HOME_W, splitY);
+}
+
+function drawFloor(ctx: CanvasRenderingContext2D, style: FloorStyle, splitY: number) {
+  const floorH = HOME_H - splitY;
+  const texture = getFloorTexture(style, floorH);
+  ctx.imageSmoothingEnabled = false; // keep the low-res texture crisp when scaled up
+  ctx.drawImage(texture, 0, splitY, HOME_W, floorH);
+}
+
+function drawTrim(ctx: CanvasRenderingContext2D, style: TrimStyle, splitY: number, height: number) {
+  const c = TRIM_COLORS[style];
+  ctx.fillStyle = c.highlight;
+  ctx.fillRect(0, splitY, HOME_W, 1);
+  ctx.fillStyle = c.body;
+  ctx.fillRect(0, splitY + 1, HOME_W, height - 2);
+  ctx.fillStyle = c.shadow;
+  ctx.fillRect(0, splitY + height - 1, HOME_W, 1);
+
+  const grad = ctx.createLinearGradient(0, splitY + height, 0, splitY + height + 3);
+  grad.addColorStop(0, 'rgba(0,0,0,0.25)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, splitY + height, HOME_W, 3);
+}
+
+// --- Window: frame reuses trim's two looks; the "outside" is a separate scene ---
+
+export type WindowFrameStyle = TrimStyle; // same two looks as the baseboard, for now — split later if they diverge
+export type OutsideStyle = 'day' | 'night';
+
+const WINDOW_FRAME_COLORS: Record<WindowFrameStyle, { highlight: string; body: string; shadow: string }> = TRIM_COLORS;
+
+const OUTSIDE_SKY: Record<OutsideStyle, { top: string; bottom: string; ground: string }> = {
+  day: { top: '#6fb7e8', bottom: '#cdeaff', ground: '#4a8f3c' },
+  night: { top: '#0b1030', bottom: '#1c2454', ground: '#152016' },
+};
+
+export interface WindowPlacement {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function buildOutsideTexture(style: OutsideStyle, w: number, h: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const octx = canvas.getContext('2d');
+  if (!octx) return canvas;
+  const sky = OUTSIDE_SKY[style];
+
+  const grad = octx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, sky.top);
+  grad.addColorStop(1, sky.bottom);
+  octx.fillStyle = grad;
+  octx.fillRect(0, 0, w, h);
+
+  const groundH = Math.round(h * 0.25);
+  octx.fillStyle = sky.ground;
+  octx.fillRect(0, h - groundH, w, groundH);
+
+  return canvas;
+}
+
+let outsideCache: { style: OutsideStyle; width: number; height: number; canvas: HTMLCanvasElement } | null = null;
+
+function getOutsideTexture(style: OutsideStyle, w: number, h: number): HTMLCanvasElement {
+  if (outsideCache && outsideCache.style === style && outsideCache.width === w && outsideCache.height === h) {
+    return outsideCache.canvas;
+  }
+  const canvas = buildOutsideTexture(style, w, h);
+  outsideCache = { style, width: w, height: h, canvas };
+  return canvas;
+}
+
+function drawWindow(
+  ctx: CanvasRenderingContext2D,
+  placement: WindowPlacement,
+  outsideStyle: OutsideStyle,
+  frameStyle: WindowFrameStyle,
+  wallW: number,
+  wallH: number
+) {
+  // Same coordinates on both sides = "reveal what's behind the wall right here."
+  // Move the window later and this line needs no changes — it'll just reveal
+  // a different slice of the same fixed backdrop, exactly like a real window.
+  const backdrop = getOutsideTexture(outsideStyle, wallW, wallH);
+  ctx.drawImage(
+    backdrop,
+    placement.x, placement.y, placement.w, placement.h,
+    placement.x, placement.y, placement.w, placement.h
+  );
+
+  const c = WINDOW_FRAME_COLORS[frameStyle];
+  const t = 4; // frame thickness
+  ctx.fillStyle = c.body;
+  ctx.fillRect(placement.x - t, placement.y - t, placement.w + t * 2, t);             // top
+  ctx.fillRect(placement.x - t, placement.y + placement.h, placement.w + t * 2, t);   // bottom
+  ctx.fillRect(placement.x - t, placement.y - t, t, placement.h + t * 2);             // left
+  ctx.fillRect(placement.x + placement.w, placement.y - t, t, placement.h + t * 2);   // right
+
+  ctx.strokeStyle = c.shadow;
+  ctx.strokeRect(placement.x - t, placement.y - t, placement.w + t * 2, placement.h + t * 2);
+
+  // cosmetic muntin cross-bar
+  ctx.fillStyle = c.highlight;
+  ctx.fillRect(placement.x + placement.w / 2 - 1, placement.y, 2, placement.h);
+  ctx.fillRect(placement.x, placement.y + placement.h / 2 - 1, placement.w, 2);
+}
+
 
 export class HomeSim {
   hudDirty = true;
@@ -319,13 +612,87 @@ export class HomeSim {
   bag: FoodBagState | null = null;
   pointer = { down: false, x: 0, y: 0 }
   lastPointer = { x: 0, y: 0, t: 0 }
+  style: HomeStyle = { wall: 'indigo', floor: 'walnut-plank', trim: 'white', windowFrame: 'white', outside: 'day' };
+  // TODO once the decor editor exists: clamp windowPlacement so it can't be
+  // dragged too low into (or past) the floor line — something like
+  // `p.y + p.h <= wallSplitY() - MIN_WINDOW_MARGIN`.
+  windowPlacement: WindowPlacement = { x: 130, y: 60, w: 100, h: 80 };
+  onFed: (() => void) | null = null;
 
-  bgImg: HTMLImageElement | null = null;
   bowlImg: HTMLImageElement | null = null;
   bagImg: HTMLImageElement | null = null;
   eatImg: HTMLImageElement | null = null;
   idleImg: HTMLImageElement | null = null;
   walkImg: HTMLImageElement | null = null;
+
+  constructor() {
+    this.loadSave();
+  }
+
+  persistNow() {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(HOME_SAVE_KEY, JSON.stringify({
+        v: HOME_SAVE_VERSION,
+        style: this.style,
+        windowPlacement: this.windowPlacement,
+      }));
+    } catch {
+      /* private browsing etc. — fails silently, same as SpiritGame */
+    }
+  }
+
+  private loadSave(): boolean {
+    if (typeof window === "undefined") return false;
+    try {
+      const raw = window.localStorage.getItem(HOME_SAVE_KEY);
+      if (!raw) return false;
+      const data = JSON.parse(raw) as { v?: number; style?: Partial<HomeStyle>; windowPlacement?: Partial<WindowPlacement> };
+      if (data.v !== HOME_SAVE_VERSION) return false;
+      if (data.style?.wall && data.style.wall in WALL_COLORS) this.style.wall = data.style.wall;
+      if (data.style?.floor && data.style.floor in FLOOR_PALETTES) this.style.floor = data.style.floor;
+      if (data.style?.trim && data.style.trim in TRIM_COLORS) this.style.trim = data.style.trim;
+      if (data.style?.windowFrame && data.style.windowFrame in WINDOW_FRAME_COLORS) this.style.windowFrame = data.style.windowFrame;
+      if (data.style?.outside && data.style.outside in OUTSIDE_SKY) this.style.outside = data.style.outside;
+      const p = data.windowPlacement;
+      if (p && typeof p.x === "number" && typeof p.y === "number" && typeof p.w === "number" && typeof p.h === "number") {
+        this.windowPlacement = { x: p.x, y: p.y, w: p.w, h: p.h };
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  setWallStyle(style: WallStyle) {
+    this.style.wall = style;
+    this.hudDirty = true;
+    this.persistNow();
+  }
+
+  setFloorStyle(style: FloorStyle) {
+    this.style.floor = style;
+    this.hudDirty = true;
+    this.persistNow();
+  }
+
+  setTrimStyle(style: TrimStyle) {
+    this.style.trim = style;
+    this.hudDirty = true;
+    this.persistNow();
+  }
+
+  setWindowFrameStyle(style: WindowFrameStyle) {
+    this.style.windowFrame = style;
+    this.hudDirty = true;
+    this.persistNow();
+  }
+
+  setOutsideStyle(style: OutsideStyle) {
+    this.style.outside = style;
+    this.hudDirty = true;
+    this.persistNow();
+  }
 
   tick(dt: number) {
     const step = Math.min(dt, 0.1); // safety clamp
@@ -345,6 +712,7 @@ export class HomeSim {
     updatePup(this.pup, this.bowl, step);
     tickBowl(this.bowl, step, () => {
       onPupFinishedEating(this.pup);   // hunger = 100, isEating = false, back to wandering
+      this.onFed?.();
       this.hudDirty = true;
     });
   }
@@ -384,14 +752,12 @@ export class HomeSim {
 
   loadSprites() {
     return Promise.all([
-      loadImage("/sprites/home-bg.png"),
       loadImage("/sprites/bowl.png"),
       loadImage("/sprites/food-bag.png"),
       loadImage("/sprites/pup-eating.png"),
       loadImage("/sprites/pup-idle.png"),
       loadImage("/sprites/pup-walk.png"),
-    ]).then(([bg, bowl, bag, eat, idle, walk]) => {
-      this.bgImg = bg;
+    ]).then(([bowl, bag, eat, idle, walk]) => {
       this.bowlImg = bowl;
       this.bagImg = bag;
       this.eatImg = eat;
@@ -404,7 +770,11 @@ export class HomeSim {
   draw(ctx: CanvasRenderingContext2D) {
     ctx.imageSmoothingEnabled = false; // keeps pixel art crisp
 
-    if (this.bgImg) ctx.drawImage(this.bgImg, 0, 0, HOME_W, HOME_H);
+    const splitY = wallSplitY();
+    drawWall(ctx, this.style.wall, splitY);
+    drawWindow(ctx, this.windowPlacement, this.style.outside, this.style.windowFrame, HOME_W, splitY);
+    drawFloor(ctx, this.style.floor, splitY);
+    drawTrim(ctx, this.style.trim, splitY, trimHeight());
 
     if (this.bowlImg) {
       const frame =

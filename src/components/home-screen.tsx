@@ -1,5 +1,8 @@
 import { useEffect, useRef } from "react";
 import { HOME_H, HOME_W, HomeSim } from "@/game/home";
+import type { SpiritGame } from "@/game/adventurebound";
+import { formatDuration } from "@/lib/utils";
+
 
 function toRoomCoords(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
   const rect = canvas.getBoundingClientRect();
@@ -12,14 +15,17 @@ function toRoomCoords(canvas: HTMLCanvasElement, clientX: number, clientY: numbe
 }
 
 
-export function HomeScreen({ onGoAdventure }: { onGoAdventure: () => void }) {
+export function HomeScreen({ game, onGoAdventure }: { game: SpiritGame; onGoAdventure: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const simRef = useRef<HomeSim | null>(null);
+  const buffRef = useRef<HTMLSpanElement | null>(null);
+
 
   useEffect(() => {
     const sim = new HomeSim();
     simRef.current = sim;
+    sim.onFed = () => game.applyEnergyRegenBuff();
     void sim.loadSprites().catch(() => undefined);
 
     const canvas = canvasRef.current;
@@ -62,48 +68,61 @@ export function HomeScreen({ onGoAdventure }: { onGoAdventure: () => void }) {
       sim.draw(ctx);
       raf = requestAnimationFrame(loop);
     };
+    if (buffRef.current) {
+      const remaining = Math.max(0, game.regenBuffUntil - Date.now());
+      buffRef.current.textContent = remaining > 0 ? `Well Fed · ${formatDuration(remaining)}` : "";
+    }
+
     raf = requestAnimationFrame(loop);
 
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      sim.persistNow();
     };
-  }, []);
+  }, [game]);
 
   return (
-  <div className="flex h-dvh items-center justify-center bg-bg">
-    <div
-      className="relative w-full"
-      style={{ maxWidth: "calc(100dvh * 360 / 713)", aspectRatio: "360 / 713" }}
-    >
-      <div ref={wrapRef} className="absolute inset-x-0 top-0" style={{ height: `${(640 / 713) * 100}%` }}>
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 h-full w-full touch-none"
-          onPointerDown={(e) => {
-            if (!canvasRef.current) return;
-            const { x, y } = toRoomCoords(canvasRef.current, e.clientX, e.clientY);
-            simRef.current?.pointerDown(x, y);
-          }}
-          onPointerMove={(e) => {
-            if (!canvasRef.current) return;
-            const { x, y } = toRoomCoords(canvasRef.current, e.clientX, e.clientY);
-            simRef.current?.pointerMove(x, y);
-          }}
-          onPointerUp={() => simRef.current?.pointerUp()}
-          onPointerLeave={() => simRef.current?.pointerUp()}
-        />
-      </div>
-      <div className="absolute inset-x-0 bottom-0" style={{ height: `${(73 / 713) * 100}%` }}>
-        <img src="/sprites/menu-bar.png" className="h-full w-full" style={{ imageRendering: "pixelated" }} alt="" />
-        <button className="absolute top-0 left-0 h-full w-1/4" aria-label="Market" disabled />
-        <button className="absolute top-0 left-1/4 h-full w-1/4" aria-label="Home" disabled />
-        <button className="absolute top-0 left-2/4 h-full w-1/4" aria-label="Adventure" onClick={onGoAdventure} />
-        <button className="absolute top-0 left-3/4 h-full w-1/4" aria-label="Lab" disabled />
+    <div className="flex h-dvh items-center justify-center bg-bg">
+      <div
+        className="relative w-full"
+        style={{ maxWidth: "calc(100dvh * 360 / 713)", aspectRatio: "360 / 713" }}
+      >
+        <div ref={wrapRef} className="absolute inset-x-0 top-0" style={{ height: `${(640 / 713) * 100}%` }}>
+          <canvas
+            ref={canvasRef}
+            className="absolute inset-0 h-full w-full touch-none"
+            onPointerDown={(e) => {
+              if (!canvasRef.current) return;
+              const { x, y } = toRoomCoords(canvasRef.current, e.clientX, e.clientY);
+              simRef.current?.pointerDown(x, y);
+            }}
+
+            onPointerMove={(e) => {
+              if (!canvasRef.current) return;
+              const { x, y } = toRoomCoords(canvasRef.current, e.clientX, e.clientY);
+              simRef.current?.pointerMove(x, y);
+            }}
+            onPointerUp={() => simRef.current?.pointerUp()}
+            onPointerLeave={() => simRef.current?.pointerUp()}
+          />
+
+          <span
+            ref={buffRef}
+            className="pointer-events-none absolute left-2 top-2 z-10 rounded bg-black/60 px-2 py-1 text-[10px] font-mono uppercase tracking-wide text-accent"
+          />
+
+        </div>
+        <div className="absolute inset-x-0 bottom-0" style={{ height: `${(73 / 713) * 100}%` }}>
+          <img src="/sprites/menu-bar.png" className="h-full w-full" style={{ imageRendering: "pixelated" }} alt="" />
+          <button className="absolute top-0 left-0 h-full w-1/4" aria-label="Market" disabled />
+          <button className="absolute top-0 left-1/4 h-full w-1/4" aria-label="Home" disabled />
+          <button className="absolute top-0 left-2/4 h-full w-1/4" aria-label="Adventure" onClick={onGoAdventure} />
+          <button className="absolute top-0 left-3/4 h-full w-1/4" aria-label="Lab" disabled />
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
 
 }
 
