@@ -46,6 +46,7 @@ export function tickBowl(bowl: Bowl, dt: number, onFinished: () => void) {
 
 export const HOME_W = 360;
 export const HOME_H = 640;
+export const HOME_WORLD_W = 900;
 
 const BOWL_FRAME_W = 15;
 const BOWL_FRAME_H = 14;
@@ -55,7 +56,7 @@ const BAG_FRAME_W = 34;
 const BAG_FRAME_H = 41;
 const BAG_SCALE = 1.2;
 const HOME_SAVE_KEY = "aetherbound-home-save";
-const HOME_SAVE_VERSION = 1;
+const HOME_SAVE_VERSION = 4;
 
 
 
@@ -73,7 +74,7 @@ export interface PupState {
   x: number;
   y: number;
   hunger: number;          // 0-100
-  wanderDir: { x: number; y: number }; 
+  wanderDir: { x: number; y: number };
   homestyle: number;
   decisionTimer: number;
   facingRight: boolean;    // replaces Godot's flip_h
@@ -92,7 +93,7 @@ const ARRIVE_DIST = 10;
 const WAIT_ARRIVE_DIST = 5;
 
 // Fence — PLACEHOLDER, re-measure against the actual home canvas before using
-const FENCE = { minX: 45, maxX: 335, minY: 323, maxY: 630 };
+const FENCE = { minX: 40, maxX: HOME_WORLD_W - 40, minY: 323, maxY: 630 };
 // Give up wait timer
 const WAIT_GIVE_UP_SEC = 10;
 
@@ -491,24 +492,24 @@ function getFloorTexture(style: FloorStyle, floorH: number): HTMLCanvasElement {
 
 function drawWall(ctx: CanvasRenderingContext2D, style: WallStyle, splitY: number) {
   ctx.fillStyle = WALL_COLORS[style];
-  ctx.fillRect(0, 0, HOME_W, splitY);
+  ctx.fillRect(0, 0, HOME_WORLD_W, splitY);
 }
 
 function drawFloor(ctx: CanvasRenderingContext2D, style: FloorStyle, splitY: number) {
   const floorH = HOME_H - splitY;
   const texture = getFloorTexture(style, floorH);
   ctx.imageSmoothingEnabled = false; // keep the low-res texture crisp when scaled up
-  ctx.drawImage(texture, 0, splitY, HOME_W, floorH);
+  ctx.drawImage(texture, 0, splitY, HOME_WORLD_W, floorH);
 }
 
 function drawTrim(ctx: CanvasRenderingContext2D, style: TrimStyle, splitY: number, height: number) {
   const c = TRIM_COLORS[style];
   ctx.fillStyle = c.highlight;
-  ctx.fillRect(0, splitY, HOME_W, 1);
+  ctx.fillRect(0, splitY, HOME_WORLD_W, 1);
   ctx.fillStyle = c.body;
-  ctx.fillRect(0, splitY + 1, HOME_W, height - 2);
+  ctx.fillRect(0, splitY + 1, HOME_WORLD_W, height - 2);
   ctx.fillStyle = c.shadow;
-  ctx.fillRect(0, splitY + height - 1, HOME_W, 1);
+  ctx.fillRect(0, splitY + height - 1, HOME_WORLD_W, 1);
 
   const grad = ctx.createLinearGradient(0, splitY + height, 0, splitY + height + 3);
   grad.addColorStop(0, 'rgba(0,0,0,0.25)');
@@ -530,6 +531,13 @@ const OUTSIDE_SKY: Record<OutsideStyle, { top: string; bottom: string; ground: s
 };
 
 export interface WindowPlacement {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface DoorPlacement {
   x: number;
   y: number;
   w: number;
@@ -566,6 +574,28 @@ function getOutsideTexture(style: OutsideStyle, w: number, h: number): HTMLCanva
   const canvas = buildOutsideTexture(style, w, h);
   outsideCache = { style, width: w, height: h, canvas };
   return canvas;
+}
+
+function drawDoor(ctx: CanvasRenderingContext2D, placement: DoorPlacement) {
+  const { x, y, w, h } = placement;
+  ctx.fillStyle = '#4a2f1c';
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x, y + w / 2);
+  ctx.arcTo(x, y, x + w / 2, y, w / 2);
+  ctx.arcTo(x + w, y, x + w, y + w / 2, w / 2);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = shade('#4a2f1c', -0.3);
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = '#caa24a'; // handle
+  ctx.beginPath();
+  ctx.arc(x + w - 12, y + h * 0.55, 3, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 function drawWindow(
@@ -617,7 +647,26 @@ export class HomeSim {
   // dragged too low into (or past) the floor line — something like
   // `p.y + p.h <= wallSplitY() - MIN_WINDOW_MARGIN`.
   windowPlacement: WindowPlacement = { x: 130, y: 60, w: 100, h: 80 };
+  camera = { x: 0 };
+  cameraFollow = true;
+  private isPanningCamera = false;
+  private panStartPointerX = 0;
+  private panStartCameraX = 0;
+  door: DoorPlacement = { x: HOME_WORLD_W - 140, y: wallSplitY() - 148, w: 70, h: 160 };
+  onDoorTapped: (() => void) | null = null;
   onFed: (() => void) | null = null;
+
+  // Tracks which decor fields the player has explicitly customized (via the
+  // future decor editor) vs. which still use the code's built-in defaults.
+  // Only customized fields get written to the save — this is what lets a
+  // tuned default in code take effect for anyone who never touched that
+  // field, instead of an old save re-imposing whatever the default was when
+  // it was written. All writes to style/windowPlacement/door must go through
+  // their setters, or this tracking silently gets out of sync.
+  private customized: {
+    wall?: true; floor?: true; trim?: true; windowFrame?: true; outside?: true;
+    windowPlacement?: true; door?: true;
+  } = {};
 
   bowlImg: HTMLImageElement | null = null;
   bagImg: HTMLImageElement | null = null;
@@ -632,10 +681,25 @@ export class HomeSim {
   persistNow() {
     if (typeof window === "undefined") return;
     try {
+      // Sparse save: only include a field if the player actually customized
+      // it. Anything omitted here means "no opinion" — loadSave() leaves
+      // whatever the current code default is, so tuning a default in code
+      // takes effect immediately for anyone who never touched that field.
+      const style: Partial<HomeStyle> = {};
+      if (this.customized.wall) style.wall = this.style.wall;
+      if (this.customized.floor) style.floor = this.style.floor;
+      if (this.customized.trim) style.trim = this.style.trim;
+      if (this.customized.windowFrame) style.windowFrame = this.style.windowFrame;
+      if (this.customized.outside) style.outside = this.style.outside;
+
+      // JSON.stringify drops object properties whose value is `undefined`,
+      // so windowPlacement/door simply vanish from the saved JSON when not
+      // customized — no separate "isCustomized" flag needs to be persisted.
       window.localStorage.setItem(HOME_SAVE_KEY, JSON.stringify({
         v: HOME_SAVE_VERSION,
-        style: this.style,
-        windowPlacement: this.windowPlacement,
+        style,
+        windowPlacement: this.customized.windowPlacement ? this.windowPlacement : undefined,
+        door: this.customized.door ? this.door : undefined,
       }));
     } catch {
       /* private browsing etc. — fails silently, same as SpiritGame */
@@ -647,16 +711,44 @@ export class HomeSim {
     try {
       const raw = window.localStorage.getItem(HOME_SAVE_KEY);
       if (!raw) return false;
-      const data = JSON.parse(raw) as { v?: number; style?: Partial<HomeStyle>; windowPlacement?: Partial<WindowPlacement> };
+      const data = JSON.parse(raw) as {
+        v?: number; style?: Partial<HomeStyle>;
+        windowPlacement?: Partial<WindowPlacement>; door?: Partial<DoorPlacement>;
+      };
       if (data.v !== HOME_SAVE_VERSION) return false;
-      if (data.style?.wall && data.style.wall in WALL_COLORS) this.style.wall = data.style.wall;
-      if (data.style?.floor && data.style.floor in FLOOR_PALETTES) this.style.floor = data.style.floor;
-      if (data.style?.trim && data.style.trim in TRIM_COLORS) this.style.trim = data.style.trim;
-      if (data.style?.windowFrame && data.style.windowFrame in WINDOW_FRAME_COLORS) this.style.windowFrame = data.style.windowFrame;
-      if (data.style?.outside && data.style.outside in OUTSIDE_SKY) this.style.outside = data.style.outside;
+      // A field being present here means a past persistNow() considered it
+      // customized (that's the only time it's ever written) — so restoring
+      // it must also re-mark it customized, or the next persistNow() would
+      // silently drop it for lacking the flag.
+      if (data.style?.wall && data.style.wall in WALL_COLORS) {
+        this.style.wall = data.style.wall;
+        this.customized.wall = true;
+      }
+      if (data.style?.floor && data.style.floor in FLOOR_PALETTES) {
+        this.style.floor = data.style.floor;
+        this.customized.floor = true;
+      }
+      if (data.style?.trim && data.style.trim in TRIM_COLORS) {
+        this.style.trim = data.style.trim;
+        this.customized.trim = true;
+      }
+      if (data.style?.windowFrame && data.style.windowFrame in WINDOW_FRAME_COLORS) {
+        this.style.windowFrame = data.style.windowFrame;
+        this.customized.windowFrame = true;
+      }
+      if (data.style?.outside && data.style.outside in OUTSIDE_SKY) {
+        this.style.outside = data.style.outside;
+        this.customized.outside = true;
+      }
       const p = data.windowPlacement;
       if (p && typeof p.x === "number" && typeof p.y === "number" && typeof p.w === "number" && typeof p.h === "number") {
         this.windowPlacement = { x: p.x, y: p.y, w: p.w, h: p.h };
+        this.customized.windowPlacement = true;
+      }
+      const d = data.door;
+      if (d && typeof d.x === "number" && typeof d.y === "number" && typeof d.w === "number" && typeof d.h === "number") {
+        this.door = { x: d.x, y: d.y, w: d.w, h: d.h };
+        this.customized.door = true;
       }
       return true;
     } catch {
@@ -666,32 +758,65 @@ export class HomeSim {
 
   setWallStyle(style: WallStyle) {
     this.style.wall = style;
+    this.customized.wall = true;
     this.hudDirty = true;
     this.persistNow();
   }
 
   setFloorStyle(style: FloorStyle) {
     this.style.floor = style;
+    this.customized.floor = true;
     this.hudDirty = true;
     this.persistNow();
   }
 
   setTrimStyle(style: TrimStyle) {
     this.style.trim = style;
+    this.customized.trim = true;
     this.hudDirty = true;
     this.persistNow();
   }
 
   setWindowFrameStyle(style: WindowFrameStyle) {
     this.style.windowFrame = style;
+    this.customized.windowFrame = true;
     this.hudDirty = true;
     this.persistNow();
   }
 
   setOutsideStyle(style: OutsideStyle) {
     this.style.outside = style;
+    this.customized.outside = true;
     this.hudDirty = true;
     this.persistNow();
+  }
+
+  // Live drag-preview (once the decor editor exists) should mutate
+  // windowPlacement/door directly, frame by frame, with NO call to these
+  // setters — hitting localStorage on every pointer-move would be wasteful
+  // and janky. Call these once, on drag-END, to commit the final position.
+  setWindowPlacement(p: WindowPlacement) {
+    // TODO once the decor editor exists: clamp so it can't be dragged
+    // too low into (or past) the floor line — see the field's own TODO above.
+    this.windowPlacement = p;
+    this.customized.windowPlacement = true;
+    this.hudDirty = true;
+    this.persistNow();
+  }
+
+  setDoorPlacement(d: DoorPlacement) {
+    this.door = d;
+    this.customized.door = true;
+    this.hudDirty = true;
+    this.persistNow();
+  }
+
+  private clampCameraX(x: number): number {
+    return Math.max(0, Math.min(HOME_WORLD_W - HOME_W, x));
+  }
+
+  lockCameraToPup() {
+    this.cameraFollow = true;
   }
 
   tick(dt: number) {
@@ -710,6 +835,10 @@ export class HomeSim {
     }
 
     updatePup(this.pup, this.bowl, step);
+    if (this.cameraFollow) {
+      const target = this.clampCameraX(this.pup.x - HOME_W / 2);
+      this.camera.x += (target - this.camera.x) * Math.min(1, 6 * step); // ease toward the pup 
+    }
     tickBowl(this.bowl, step, () => {
       onPupFinishedEating(this.pup);   // hunger = 100, isEating = false, back to wandering
       this.onFed?.();
@@ -727,27 +856,53 @@ export class HomeSim {
     );
   }
 
-  pointerDown(x: number, y: number) {
-    // With a bag out: grab it again by pressing near it (or near the bowl).
-    // With no bag: only a press on an EMPTY bowl starts one.
-    const grabbing = this.bag
-      ? Math.hypot(x - this.bag.x, y - this.bag.y) < 50 || this.hitBowl(x, y)
-      : this.bowl.state === 'empty' && this.hitBowl(x, y);
-    if (!grabbing) return;
+  private hitDoor(x: number, y: number) {
+    return x >= this.door.x && x <= this.door.x + this.door.w && y >= this.door.y && y <= this.door.y + this.door.h;
+  }
 
-    this.pointer = { down: true, x, y };
-    if (!this.bag) this.bag = createFoodBag(x, y);
-    this.lastPointer = { x, y, t: this.time * 1000 };  // avoid a velocity spike on the first frame
+
+  pointerDown(x: number, y: number) {
+    const wx = x + this.camera.x; // viewport → world, at this one boundary
+    const wy = y;
+
+    if (this.hitDoor(wx, wy)) {
+      this.onDoorTapped?.();
+      return;
+    }
+
+    const grabbing = this.bag
+      ? Math.hypot(wx - this.bag.x, wy - this.bag.y) < 50 || this.hitBowl(wx, wy)
+      : this.bowl.state === 'empty' && this.hitBowl(wx, wy);
+
+    if (grabbing) {
+      this.pointer = { down: true, x: wx, y: wy };
+      if (!this.bag) this.bag = createFoodBag(wx, wy);
+      this.lastPointer = { x: wx, y: wy, t: this.time * 1000 };
+      return;
+    }
+
+    // Neither the door nor the bowl/bag: start panning instead.
+    this.isPanningCamera = true;
+    this.cameraFollow = false; // manual control until "lock" is tapped
+    this.panStartPointerX = x; // viewport-space — camera.x is about to move, world-space would drift
+    this.panStartCameraX = this.camera.x;
   }
 
   pointerMove(x: number, y: number) {
-    this.pointer.x = x;
+    if (this.isPanningCamera) {
+      const dx = x - this.panStartPointerX;
+      this.camera.x = this.clampCameraX(this.panStartCameraX - dx);
+      return;
+    }
+    this.pointer.x = x + this.camera.x;
     this.pointer.y = y;
   }
 
   pointerUp() {
-    this.pointer.down = false;   // the bag stays where it is; progress is kept
+    this.isPanningCamera = false;
+    this.pointer.down = false;
   }
+
 
 
   loadSprites() {
@@ -769,12 +924,16 @@ export class HomeSim {
 
   draw(ctx: CanvasRenderingContext2D) {
     ctx.imageSmoothingEnabled = false; // keeps pixel art crisp
+    ctx.save();
+    ctx.translate(-this.camera.x, 0);
 
     const splitY = wallSplitY();
     drawWall(ctx, this.style.wall, splitY);
-    drawWindow(ctx, this.windowPlacement, this.style.outside, this.style.windowFrame, HOME_W, splitY);
     drawFloor(ctx, this.style.floor, splitY);
+    drawWindow(ctx, this.windowPlacement, this.style.outside, this.style.windowFrame, HOME_WORLD_W, splitY);
     drawTrim(ctx, this.style.trim, splitY, trimHeight());
+    drawDoor(ctx, this.door);
+    
 
     if (this.bowlImg) {
       const frame =
@@ -792,7 +951,10 @@ export class HomeSim {
     const pup = this.pup;
     const walking = pup.anim === 'walk';
     const sheet = walking ? this.walkImg : this.idleImg; // 'eating' uses idle until the sheet is reformatted
-    if (!sheet) return;
+    if (!sheet) {
+      ctx.restore(); // undo translate - IMPORTANT
+      return;
+    }
     const frames = walking ? 4 : 12;
     const fps = walking ? 8 : 6;
     const frame = Math.floor(this.time * fps) % frames;
@@ -830,7 +992,9 @@ export class HomeSim {
       ctx.fillStyle = "yellow";
       ctx.fillRect(this.bowl.x - 2, this.bowl.y - 2, 4, 4);
     }
-
+    
+    ctx.restore();
+  
   }
 
 }
