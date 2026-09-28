@@ -1,4 +1,5 @@
 import { mulberry32, PUP_CELL, PUP_CENTER_X, PUP_FEET_Y } from "@/game/adventurebound";
+import type { Particle } from "@/game/adventurebound";
 
 export type BowlState = 'full' | 'pouring' | 'empty';
 
@@ -52,9 +53,20 @@ const BOWL_FRAME_W = 15;
 const BOWL_FRAME_H = 14;
 const BOWL_SCALE = 2;
 const HOME_PUP_SCALE = 3;
+// pup-eating.png's own native frame size — a smaller art scale than the
+// 64x64 idle/walk cells, not a mistake. EAT_SCALE and the y-offset where
+// it's drawn are the two knobs to eyeball-tune once you see it on screen.
+const EAT_FRAME_W = 24;
+const EAT_FRAME_H = 15;
+const EAT_SCALE = 3;
 const BAG_FRAME_W = 34;
 const BAG_FRAME_H = 41;
 const BAG_SCALE = 1.2;
+const BAG_PARTICLE_CAP = 24;
+const BAG_PARTICLE_RATE = 0.04; // seconds between spawns while shaking (~25/sec)
+const FEED_ZOOM = 1.6;          // how far the camera zooms in while a feeding bag exists
+const CAMERA_EASE = 6;          // shared ease-speed for both pup-follow and feed-focus panning
+const ZOOM_EASE = 5;
 const HOME_SAVE_KEY = "aetherbound-home-save";
 const HOME_SAVE_VERSION = 4;
 
@@ -87,8 +99,6 @@ export interface PupState {
 
 
 const SPEED = 60;
-const HUNGER_DECAY_PER_SEC = 3;
-const HUNGRY_THRESHOLD = 30;
 const ARRIVE_DIST = 10;
 const WAIT_ARRIVE_DIST = 5;
 
@@ -118,29 +128,43 @@ export function createPup(x: number, y: number): PupState {
  * startEating() call — the bowl's own tickBowl() (called separately,
  * see below) is what actually finishes eating and resets hunger.
  */
-export function updatePup(pup: PupState, bowl: Bowl, dt: number) {
+/**
+ * `hungry` is decided OUTSIDE this function — see HomeSim.tick(), which
+ * derives it from the SAME "Well Fed" energy-regen buff timer that boosts
+ * Adventure energy regen. Food is unlimited right now, so that buff's
+ * duration IS the cooldown: hungry = !wellFed. `pup.hunger` itself is kept
+ * only as a 0/100 cosmetic mirror of that boolean, for a future hunger
+ * meter — nothing reads it to decide behavior anymore.
+ */
+export function updatePup(pup: PupState, bowl: Bowl, dt: number, hungry: boolean) {
   if (pup.isEating) {
     // Waiting on the bowl's own pour timer — see onPupFinishedEating below
     pup.anim = 'eating';
     return;
   }
-  const bowlPos = { x: bowl.x, y: bowl.y };
+  // A FIXED spot near the bowl, not the bowl's own x/y — so the snout lines
+  // up the same way every time regardless of which direction he wandered in
+  // from. Tune these two offsets by eye if the alignment looks off.
+  const eatSpot = { x: bowl.x - 14, y: bowl.y - 2 };
   const waitSpot = { x: bowl.x - 30, y: bowl.y - 5 };
 
   pup.decisionTimer -= dt;
-  pup.hunger = Math.max(0, pup.hunger - HUNGER_DECAY_PER_SEC * dt);
+  pup.hunger = hungry ? 0 : 100;
 
   // Pup only ever checks the bowl when it's actually hungry —
   // deliberate design call so it doesn't loiter at an empty bowl otherwise.
-  if (pup.hunger < HUNGRY_THRESHOLD) {
+  if (hungry) {
     if (bowl.state === 'full') {
-      // 1. A full bowl always wins, even if he'd given up
-      moveToward(pup, bowlPos, dt);
-      if (dist(pup, bowlPos) < ARRIVE_DIST) {
+      // 1. A full bowl always wins, even if he'd given up. Head for the
+      // fixed eat spot, not the bowl's raw x/y, so the approach always ends
+      // with the same alignment no matter which side he wandered in from.
+      moveToward(pup, eatSpot, dt);
+      if (dist(pup, eatSpot) < ARRIVE_DIST) {
         if (startEating(bowl)) {
           pup.isEating = true;
-          pup.x = bowlPos.x - 5;
-          pup.facingRight = true;
+          pup.x = eatSpot.x; // snap exactly onto the spot — no leftover approach-angle drift
+          pup.y = eatSpot.y;
+          pup.facingRight = true; // eat spot sits left of the bowl, so face right toward it
           pup.anim = 'eating';
         }
       } else {
@@ -640,6 +664,8 @@ export class HomeSim {
   bowl = createBowl(250, 325);
   pup = createPup(180, 450);
   bag: FoodBagState | null = null;
+  private bagParticles: Particle[] = [];
+  private bagParticleAcc = 0;
   pointer = { down: false, x: 0, y: 0 }
   lastPointer = { x: 0, y: 0, t: 0 }
   style: HomeStyle = { wall: 'indigo', floor: 'walnut-plank', trim: 'white', windowFrame: 'white', outside: 'day' };
@@ -649,12 +675,19 @@ export class HomeSim {
   windowPlacement: WindowPlacement = { x: 130, y: 60, w: 100, h: 80 };
   camera = { x: 0 };
   cameraFollow = true;
+  zoom = 1;
+  private zoomTarget = 1;
+  private wasFeeding = false;
   private isPanningCamera = false;
   private panStartPointerX = 0;
   private panStartCameraX = 0;
   door: DoorPlacement = { x: HOME_WORLD_W - 140, y: wallSplitY() - 148, w: 70, h: 160 };
   onDoorTapped: (() => void) | null = null;
   onFed: (() => void) | null = null;
+  // Set by HomeScreen to `() => Date.now() < game.regenBuffUntil` — lets the
+  // pup's hunger gating read the SAME "Well Fed" timer without home.ts ever
+  // importing SpiritGame directly (mirrors onFed's direction, reversed).
+  isWellFed: (() => boolean) | null = null;
 
   // Tracks which decor fields the player has explicitly customized (via the
   // future decor editor) vs. which still use the code's built-in defaults.
@@ -675,6 +708,9 @@ export class HomeSim {
   walkImg: HTMLImageElement | null = null;
 
   constructor() {
+    for (let i = 0; i < BAG_PARTICLE_CAP; i++) {
+      this.bagParticles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, size: 2, color: '#caa24a', alive: false });
+    }
     this.loadSave();
   }
 
@@ -819,6 +855,56 @@ export class HomeSim {
     this.cameraFollow = true;
   }
 
+  // Inverse of draw()'s transform (translate(W/2,H/2) → scale(zoom) →
+  // translate(-W/2-camera.x, -H/2)). Needed so hit-testing and the bag's
+  // "follow the pointer" behavior stay correct while zoomed in during
+  // feeding, not just while zoom happens to be 1.
+  private toWorld(vx: number, vy: number) {
+    return {
+      x: (vx - HOME_W / 2) / this.zoom + HOME_W / 2 + this.camera.x,
+      y: (vy - HOME_H / 2) / this.zoom + HOME_H / 2,
+    };
+  }
+
+  private spawnBagParticle(bag: FoodBagState) {
+    for (const p of this.bagParticles) {
+      if (p.alive) continue;
+      p.alive = true;
+      // The bag holds near -90° (see rotationDegrees), so its open end sits
+      // to the LEFT of its pivot point, not straight below it — shift the
+      // spawn point to match, rather than dropping particles from dead center.
+      p.x = bag.x - BAG_FRAME_H * BAG_SCALE * 0.35;
+      p.y = bag.y + BAG_FRAME_H * BAG_SCALE * 0.15;
+      const angle = Math.PI / 2 + (Math.random() - 0.5) * 0.6; // mostly downward, slight spread
+      const speed = 20 + Math.random() * 30;
+      p.vx = Math.cos(angle) * speed * 0.4;
+      p.vy = Math.sin(angle) * speed;
+      p.size = 1.5 + Math.random() * 2.5; // varying sizes, as requested
+      p.life = 0.5 + Math.random() * 0.4;
+      p.max = p.life;
+      p.color = Math.random() < 0.5 ? '#caa24a' : '#8a6a2f';
+      return; // one slot per call — tick() calls this in a loop for the spawn rate
+    }
+  }
+
+  private tickBagParticles(step: number) {
+    if (this.bag?.isShaking) {
+      this.bagParticleAcc += step;
+      while (this.bagParticleAcc >= BAG_PARTICLE_RATE) {
+        this.bagParticleAcc -= BAG_PARTICLE_RATE;
+        this.spawnBagParticle(this.bag);
+      }
+    }
+    for (const p of this.bagParticles) {
+      if (!p.alive) continue;
+      p.life -= step;
+      p.x += p.vx * step;
+      p.y += p.vy * step;
+      p.vy += 80 * step; // gravity — same constant SpiritGame's particles use
+      if (p.life <= 0) p.alive = false;
+    }
+  }
+
   tick(dt: number) {
     const step = Math.min(dt, 0.1); // safety clamp
     this.time += step; // running clock, used for animations
@@ -833,12 +919,30 @@ export class HomeSim {
       this.lastPointer = { x: this.pointer.x, y: this.pointer.y, t: elapsedMs };
       if (done) this.bag = null;
     }
+    this.tickBagParticles(step);
 
-    updatePup(this.pup, this.bowl, step);
-    if (this.cameraFollow) {
+    const hungry = !(this.isWellFed?.() ?? false); // no wiring yet (isWellFed null) → treat as hungry, same as before
+    updatePup(this.pup, this.bowl, step, hungry);
+
+    // Feeding always takes over the camera — pan+zoom onto the bowl while a
+    // bag exists, then hand control back (resume following the pup) the
+    // instant feeding ends, regardless of whether the player had manually
+    // panned away beforehand.
+    const feeding = Boolean(this.bag);
+    if (this.wasFeeding && !feeding) this.cameraFollow = true;
+    this.wasFeeding = feeding;
+
+    this.zoomTarget = feeding ? FEED_ZOOM : 1;
+    this.zoom += (this.zoomTarget - this.zoom) * Math.min(1, ZOOM_EASE * step);
+
+    if (feeding) {
+      const target = this.clampCameraX(this.bowl.x - HOME_W / 2);
+      this.camera.x += (target - this.camera.x) * Math.min(1, CAMERA_EASE * step);
+    } else if (this.cameraFollow) {
       const target = this.clampCameraX(this.pup.x - HOME_W / 2);
-      this.camera.x += (target - this.camera.x) * Math.min(1, 6 * step); // ease toward the pup 
+      this.camera.x += (target - this.camera.x) * Math.min(1, CAMERA_EASE * step); // ease toward the pup
     }
+
     tickBowl(this.bowl, step, () => {
       onPupFinishedEating(this.pup);   // hunger = 100, isEating = false, back to wandering
       this.onFed?.();
@@ -862,8 +966,7 @@ export class HomeSim {
 
 
   pointerDown(x: number, y: number) {
-    const wx = x + this.camera.x; // viewport → world, at this one boundary
-    const wy = y;
+    const { x: wx, y: wy } = this.toWorld(x, y); // viewport → world, at this one boundary
 
     if (this.hitDoor(wx, wy)) {
       this.onDoorTapped?.();
@@ -890,12 +993,13 @@ export class HomeSim {
 
   pointerMove(x: number, y: number) {
     if (this.isPanningCamera) {
-      const dx = x - this.panStartPointerX;
+      const dx = (x - this.panStartPointerX) / this.zoom; // screen delta → world delta
       this.camera.x = this.clampCameraX(this.panStartCameraX - dx);
       return;
     }
-    this.pointer.x = x + this.camera.x;
-    this.pointer.y = y;
+    const w = this.toWorld(x, y);
+    this.pointer.x = w.x;
+    this.pointer.y = w.y;
   }
 
   pointerUp() {
@@ -925,7 +1029,12 @@ export class HomeSim {
   draw(ctx: CanvasRenderingContext2D) {
     ctx.imageSmoothingEnabled = false; // keeps pixel art crisp
     ctx.save();
-    ctx.translate(-this.camera.x, 0);
+    // translate → scale → translate: zooms around the viewport's own screen
+    // center. At zoom=1 this reduces exactly to the old translate(-camera.x, 0),
+    // so nothing about normal (non-feeding) panning changes.
+    ctx.translate(HOME_W / 2, HOME_H / 2);
+    ctx.scale(this.zoom, this.zoom);
+    ctx.translate(-HOME_W / 2 - this.camera.x, -HOME_H / 2);
 
     const splitY = wallSplitY();
     drawWall(ctx, this.style.wall, splitY);
@@ -949,23 +1058,38 @@ export class HomeSim {
     }
 
     const pup = this.pup;
-    const walking = pup.anim === 'walk';
-    const sheet = walking ? this.walkImg : this.idleImg; // 'eating' uses idle until the sheet is reformatted
-    if (!sheet) {
-      ctx.restore(); // undo translate - IMPORTANT
-      return;
+    if (pup.anim === 'eating' && this.eatImg) {
+      // pup-eating.png is 4 frames of 24x15 — a different native resolution
+      // than the 64x64 idle/walk cells, so it needs its own frame math
+      // rather than reusing PUP_CELL/PUP_CENTER_X/PUP_FEET_Y. The y-offset
+      // below (edh / 2) and EAT_SCALE are the two knobs to eyeball-tune.
+      const eatFrames = 4;
+      const eatFps = 6;
+      const eatFrame = Math.floor(this.time * eatFps) % eatFrames;
+      const edw = EAT_FRAME_W * EAT_SCALE;
+      const edh = EAT_FRAME_H * EAT_SCALE;
+      ctx.save();
+      ctx.translate(pup.x, pup.y - edh / 2);
+      if (pup.facingRight) ctx.scale(-1, 1);
+      ctx.drawImage(this.eatImg, eatFrame * EAT_FRAME_W, 0, EAT_FRAME_W, EAT_FRAME_H, -edw / 2, -edh / 2, edw, edh);
+      ctx.restore();
+    } else {
+      const walking = pup.anim === 'walk';
+      const sheet = walking ? this.walkImg : this.idleImg;
+      if (sheet) {
+        const frames = walking ? 4 : 12;
+        const fps = walking ? 8 : 6;
+        const frame = Math.floor(this.time * fps) % frames;
+        const dw = PUP_CELL * HOME_PUP_SCALE;
+        const dx = pup.x - PUP_CENTER_X * HOME_PUP_SCALE;
+        const dy = pup.y - PUP_FEET_Y * HOME_PUP_SCALE;
+        ctx.save();
+        ctx.translate(dx + dw / 2, dy + dw / 2); // move the origin to the pup's center
+        if (pup.facingRight) ctx.scale(-1, 1); // mirror horizontally if facing left
+        ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, -dw / 2, -dw / 2, dw, dw);
+        ctx.restore(); // undo flip so the bowl and bag aren't mirrored
+      }
     }
-    const frames = walking ? 4 : 12;
-    const fps = walking ? 8 : 6;
-    const frame = Math.floor(this.time * fps) % frames;
-    const dw = PUP_CELL * HOME_PUP_SCALE;
-    const dx = pup.x - PUP_CENTER_X * HOME_PUP_SCALE;
-    const dy = pup.y - PUP_FEET_Y * HOME_PUP_SCALE;
-    ctx.save();
-    ctx.translate(dx + dw / 2, dy + dw / 2); // move the origin to the pup's center
-    if (pup.facingRight) ctx.scale(-1, 1); // mirror horizontally if facing left
-    ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, -dw / 2, -dw / 2, dw, dw);
-    ctx.restore(); // undo flip so the bowl and bag aren't mirrored
 
     if (this.bagImg && this.bag) {
       const bag = this.bag;
@@ -984,6 +1108,13 @@ export class HomeSim {
       ctx.restore();
     }
 
+    for (const p of this.bagParticles) {
+      if (!p.alive) continue;
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
 
     const DEBUG = false;  // Delete later
     if (DEBUG) {

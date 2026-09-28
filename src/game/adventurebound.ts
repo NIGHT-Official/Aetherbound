@@ -15,7 +15,7 @@ export const ENERGY_DRAIN_AMOUNT = 1;
 export const REGEN_PERIOD_SEC = 2.0;
 export const REGEN_ENERGY_AMOUNT = 2;
 export const REGEN_HP_CAMP = 3;
-export const REGEN_BUFF_DURATION_MS = 5 * 60 * 1000; // 5 real-world minutes
+export const REGEN_BUFF_DURATION_MS = 180 * 1000; // 180 real-world seconds
 
 
 export const ENERGY_CAP = 250;

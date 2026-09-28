@@ -27,6 +27,7 @@ export function HomeScreen({ game, onGoAdventure, onGoYard }: { game: SpiritGame
     const sim = new HomeSim();
     simRef.current = sim;
     sim.onFed = () => game.applyEnergyRegenBuff();
+    sim.isWellFed = () => Date.now() < game.regenBuffUntil;
     sim.onDoorTapped = onGoYard;
     void sim.loadSprites().catch(() => undefined);
 
