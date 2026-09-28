@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { Lock } from "lucide-react";
 import { HOME_H, HOME_W, HomeSim } from "@/game/home";
 import type { SpiritGame } from "@/game/adventurebound";
 import { formatDuration } from "@/lib/utils";
@@ -15,17 +16,18 @@ function toRoomCoords(canvas: HTMLCanvasElement, clientX: number, clientY: numbe
 }
 
 
-export function HomeScreen({ game, onGoAdventure }: { game: SpiritGame; onGoAdventure: () => void }) {
+export function HomeScreen({ game, onGoAdventure, onGoYard }: { game: SpiritGame; onGoAdventure: () => void; onGoYard: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const simRef = useRef<HomeSim | null>(null);
   const buffRef = useRef<HTMLSpanElement | null>(null);
-
+  const lockRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     const sim = new HomeSim();
     simRef.current = sim;
     sim.onFed = () => game.applyEnergyRegenBuff();
+    sim.onDoorTapped = onGoYard;
     void sim.loadSprites().catch(() => undefined);
 
     const canvas = canvasRef.current;
@@ -66,13 +68,19 @@ export function HomeScreen({ game, onGoAdventure }: { game: SpiritGame; onGoAdve
       ctx.restore();
 
       sim.draw(ctx);
+
+      if (buffRef.current) {
+        const remaining = Math.max(0, game.regenBuffUntil - Date.now());
+        buffRef.current.textContent = remaining > 0 ? `Well Fed . ${formatDuration(remaining)}` : "";
+      }
+
+      if (lockRef.current) {
+        const following = sim.cameraFollow;
+        lockRef.current.style.opacity = following ? ".5" : "1";
+        lockRef.current.style.pointerEvents = following ? "none" : "auto";
+      }
       raf = requestAnimationFrame(loop);
     };
-    if (buffRef.current) {
-      const remaining = Math.max(0, game.regenBuffUntil - Date.now());
-      buffRef.current.textContent = remaining > 0 ? `Well Fed · ${formatDuration(remaining)}` : "";
-    }
-
     raf = requestAnimationFrame(loop);
 
     return () => {
@@ -111,6 +119,16 @@ export function HomeScreen({ game, onGoAdventure }: { game: SpiritGame; onGoAdve
             ref={buffRef}
             className="pointer-events-none absolute left-2 top-2 z-10 rounded bg-black/60 px-2 py-1 text-[10px] font-mono uppercase tracking-wide text-accent"
           />
+
+          <button
+            ref={lockRef}
+            onClick={() => simRef.current?.lockCameraToPup()}
+            aria-label="Follow pup"
+            className="absolute right-2 top-2 z-10 rounded-full bg-black/50 p-2 text-white transition-opacity"
+          >
+            <Lock size={16} />
+          </button>
+
 
         </div>
         <div className="absolute inset-x-0 bottom-0" style={{ height: `${(73 / 713) * 100}%` }}>
