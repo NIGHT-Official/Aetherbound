@@ -137,6 +137,8 @@ export interface Particle {
   size: number;
   color: string;
   alive: boolean;
+  kind?: 'dust' | 'heart';
+  targetSize?: number;
 }
 
 export interface Floater {

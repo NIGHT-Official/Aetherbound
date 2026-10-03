@@ -1,7 +1,7 @@
 import { Archive, Ear, Home, Play, Shield, Square, Swords, Wand2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { cn, formatDuration } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import {
   ENERGY_CAP,
   ENERGY_DRAIN_AMOUNT,
@@ -12,6 +12,7 @@ import {
   WORLD_W,
   type HudSnapshot,
 } from "@/game/adventurebound";
+import { BuffChip } from "@/components/buff-chip";
 
 const emptyHud: HudSnapshot = {
   adventure: false,
@@ -416,11 +417,7 @@ export function SpiritWalk({ game, onGoHome }: { game: SpiritGame; onGoHome: () 
                 </div>
               </div>
 
-              {hud.regenBuffRemainingMs > 0 && (
-                <p className="mt-1 text-[11px] font-mono uppercase tracking-wide text-accent">
-                  Well Fed · regen boosted for {formatDuration(hud.regenBuffRemainingMs)}
-                </p>
-              )}
+              <BuffChip label="Well Fed" remainingMs={hud.regenBuffRemainingMs} />
 
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs font-medium tracking-wide text-muted uppercase">Spend Energy</span>

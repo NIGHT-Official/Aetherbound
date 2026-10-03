@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Lock } from "lucide-react";
 import { HOME_H, HOME_W, HomeSim } from "@/game/home";
 import type { SpiritGame } from "@/game/adventurebound";
 import { formatDuration } from "@/lib/utils";
-
+import { RadialMenu } from "@/components/radial-menu";
+import { BuffChip } from "@/components/buff-chip";
 
 function toRoomCoords(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
   const rect = canvas.getBoundingClientRect();
@@ -22,10 +23,36 @@ export function HomeScreen({ game, onGoAdventure, onGoYard }: { game: SpiritGame
   const simRef = useRef<HomeSim | null>(null);
   const buffRef = useRef<HTMLSpanElement | null>(null);
   const lockRef = useRef<HTMLButtonElement | null>(null);
+  const [careRingOpen, setCareRingOpen] = useState(false);
+  const [pupBuffs, setPupBuffs] = useState({
+    brushRemainingMs: 0,
+    washRemainingMs: 0,
+    washCooldownRemainingMs: 0,
+    soapCount: 0,
+  });
+
+  useEffect(() => {
+    if (!careRingOpen) return;
+    const tick = () => {
+      const sim = simRef.current;
+      if (!sim) return;
+      const now = Date.now();
+      setPupBuffs({
+        brushRemainingMs: sim.pup.brushBuffUntil - now,
+        washRemainingMs: sim.pup.washBuffUntil - now,
+        washCooldownRemainingMs: sim.pup.washCooldownUntil - now,
+        soapCount: sim.soapCount,
+      });
+    };
+    tick(); // populate immediately on open, dont wait a full second
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [careRingOpen]);
 
   useEffect(() => {
     const sim = new HomeSim();
     simRef.current = sim;
+    sim.onPupTapped = () => setCareRingOpen(true);
     sim.onFed = () => game.applyEnergyRegenBuff();
     sim.isWellFed = () => Date.now() < game.regenBuffUntil;
     sim.onDoorTapped = onGoYard;
@@ -129,8 +156,6 @@ export function HomeScreen({ game, onGoAdventure, onGoYard }: { game: SpiritGame
           >
             <Lock size={16} />
           </button>
-
-
         </div>
         <div className="absolute inset-x-0 bottom-0" style={{ height: `${(73 / 713) * 100}%` }}>
           <img src="/sprites/menu-bar.png" className="h-full w-full" style={{ imageRendering: "pixelated" }} alt="" />
@@ -140,6 +165,62 @@ export function HomeScreen({ game, onGoAdventure, onGoYard }: { game: SpiritGame
           <button className="absolute top-0 left-3/4 h-full w-1/4" aria-label="Lab" disabled />
         </div>
       </div>
+      {careRingOpen && (
+        <div
+          className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setCareRingOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl border border-border bg-surface p-4 shadow-[0_12px_40px_rgba(0,0,0,0.45)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-medium text-fg">Sol</p>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <BuffChip label="Brushed" remainingMs={pupBuffs.brushRemainingMs} />
+              <BuffChip label="Washed" remainingMs={pupBuffs.washRemainingMs} />
+            </div>
+
+            <div className="mt-4 flex justify-center">
+              <RadialMenu
+                radius={80}
+                center={<span className="text-xs">pup</span>}
+                items={[
+                  {
+                    id: "pet", label: "Pet", icon: "🖐", angleDeg: 0, status: "always-on",
+                    onSelect: () => {
+                      simRef.current?.startPetting();
+                      setCareRingOpen(false);
+                    },
+                  },
+
+                  {
+                    id: "brush", label: "Brush", icon: "🧹", angleDeg: 240,
+                    status: pupBuffs.brushRemainingMs > 0 ? "cooldown" : "ready",
+                    cooldownLabel: pupBuffs.brushRemainingMs > 0 ? formatDuration(pupBuffs.brushRemainingMs)
+                      : undefined,
+                    onSelect: () => {
+                      simRef.current?.startBrushing();
+                      setCareRingOpen(false);
+                    }
+                  },
+
+                  {
+                    id: "wash", label: "Wash", icon: "🛁", angleDeg: 120,
+                    status: pupBuffs.washCooldownRemainingMs > 0 || pupBuffs.soapCount <= 0 ? "cooldown" : "ready",
+                    cooldownLabel: pupBuffs.washCooldownRemainingMs > 0
+                      ? formatDuration(pupBuffs.washCooldownRemainingMs)
+                      : `soap ${pupBuffs.soapCount}`,
+                  },
+                ]}
+              />
+            </div>
+
+            <p className="mt-3 text-center text-[10px] text-muted">tap anywhere else to close</p>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 

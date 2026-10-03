@@ -64,6 +64,8 @@ const BAG_FRAME_H = 41;
 const BAG_SCALE = 1.2;
 const BAG_PARTICLE_CAP = 24;
 const BAG_PARTICLE_RATE = 0.04; // seconds between spawns while shaking (~25/sec)
+const HEART_PARTICLE_RATE = 0.8; // seconds between hearts while Petting - sparse
+const HEART_GROWTH_FRACTION = 0.2; // how much of a heart's life is spent growing to its full size, as 0-1
 const FEED_ZOOM = 1.6;          // how far the camera zooms in while a feeding bag exists
 const CAMERA_EASE = 6;          // shared ease-speed for both pup-follow and feed-focus panning
 const ZOOM_EASE = 5;
@@ -87,13 +89,16 @@ export interface PupState {
   y: number;
   hunger: number;          // 0-100
   wanderDir: { x: number; y: number };
-  homestyle: number;
   decisionTimer: number;
   facingRight: boolean;    // replaces Godot's flip_h
   anim: 'idle' | 'walk' | 'eating';
   isEating: boolean;
   waitTimer: number;   // seconds spent standing at the wait spot
   gaveUp: boolean;     // true once he's tired of waiting; cleared after he eats
+  brushBuffUntil: number;   // epoch ms; 0 or past = no active buff
+  brushTier: number;    // 0 = base brush; unused, stub for future market item
+  washBuffUntil: number;    // epoch ms
+  washCooldownUntil: number;    // epoch ms - separate from washBuffUntil on purpose
 }
 
 
@@ -106,6 +111,11 @@ const WAIT_ARRIVE_DIST = 5;
 const FENCE = { minX: 40, maxX: HOME_WORLD_W - 40, minY: 323, maxY: 630 };
 // Give up wait timer
 const WAIT_GIVE_UP_SEC = 10;
+// Grooming tuning ------------------------------------------------------
+const BRUSH_BASE_DURATION_MS = 90 * 60_000; // 90 min, still tuning
+const BRUSH_TIER_BONUS_MS = 0; // stub: future brush tiers add time here
+const WASH_BUFF_DURATION_MS = 12 * 3600_000; // 12h
+const WASH_COOLDOWN_MS = 24 * 3600_000; // 24h, deliberately different
 
 
 export function createPup(x: number, y: number): PupState {
@@ -119,8 +129,29 @@ export function createPup(x: number, y: number): PupState {
     isEating: false,
     waitTimer: 0,   // seconds spent standing at the wait spot
     gaveUp: false,     // true once he's tired of waiting; cleared after he eats
-    homestyle: 0
+    brushBuffUntil: 0,
+    brushTier: 0,
+    washBuffUntil: 0,
+    washCooldownUntil: 0,
   };
+}
+
+export function canBrush(pup: PupState): boolean {
+  return Date.now() >= pup.brushBuffUntil;
+}
+
+export function applyBrushBuff(pup: PupState) {
+  const durationMs = BRUSH_BASE_DURATION_MS + pup.brushTier * BRUSH_TIER_BONUS_MS;
+  pup.brushBuffUntil = Date.now() + durationMs;
+}
+
+export function canWash(pup: PupState, soapCount: number): boolean {
+  return soapCount > 0 && Date.now() >= pup.washCooldownUntil;
+}
+
+export function applyWashBuff(pup: PupState) {
+  pup.washBuffUntil = Date.now() + WASH_BUFF_DURATION_MS;
+  pup.washCooldownUntil = Date.now() + WASH_COOLDOWN_MS;
 }
 
 /**
@@ -268,8 +299,20 @@ export interface FoodBagState {
   particlesEmitting: boolean;
 }
 
+export interface BrushToolState {
+  x: number;
+  y: number;
+  isBrushing: boolean;
+  strokeTimer: number;
+  targetTime: number;
+}
+
 const SHAKE_VELOCITY_THRESHOLD = 100; // px/sec, matches the old Godot threshold
 const TARGET_SHAKE_TIME = 2.0;        // seconds of actual shaking needed to finish
+
+const BRUSH_VELOCITY_THRESHOLD = 60; // px/sec - gentler than food bag shake, since brushing is a more delicate motion
+const BRUSH_TARGET_TIME = 1.5;        // seconds of actual brushing needed to finish
+
 
 export function createFoodBag(x: number, y: number): FoodBagState {
   return {
@@ -280,6 +323,48 @@ export function createFoodBag(x: number, y: number): FoodBagState {
     targetTime: TARGET_SHAKE_TIME,
     particlesEmitting: false,
   };
+}
+
+export function createBrushTool(x: number, y: number): BrushToolState {
+  return {
+    x, y,
+    isBrushing: false,
+    strokeTimer: 0,
+    targetTime: BRUSH_TARGET_TIME
+  };
+}
+
+export function updateBrushTool(
+  tool: BrushToolState,
+  pointerDown: boolean,
+  pointerX: number,
+  pointerY: number,
+  deltaTime: number,
+  elapsedMs: number,
+  lastPointer: { x: number; y: number; t: number },
+  onComplete: () => void
+): boolean {
+  if (pointerDown) {
+    // Follow the pointer
+    tool.x = pointerX;
+    tool.y = pointerY;
+
+    // Manual velocity calc (Godot did this for free)
+    const dx = pointerX - lastPointer.x;
+    const dy = pointerY - lastPointer.y;
+    const dt = Math.max(elapsedMs - lastPointer.t, 1); // avoid divide-by-zero
+    const velocity = Math.sqrt(dx * dx + dy * dy) / (dt / 1000);
+
+    tool.isBrushing = velocity > BRUSH_VELOCITY_THRESHOLD;
+    if (tool.isBrushing) tool.strokeTimer += deltaTime;
+  } else {
+    tool.isBrushing = false;
+  }
+  if (tool.strokeTimer >= tool.targetTime) {
+    onComplete();
+    return true; // caller removes this tool from its entity list
+  }
+  return false;
 }
 
 /**
@@ -600,6 +685,28 @@ function getOutsideTexture(style: OutsideStyle, w: number, h: number): HTMLCanva
   return canvas;
 }
 
+const HEART_PIXELS = [
+  '.#.#.',
+  '#####',
+  '#####',
+  '.###.',
+  '..#..',
+];
+
+function drawPixelHeart(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string) {
+  const cols = HEART_PIXELS[0].length;
+  const rows = HEART_PIXELS.length;
+  const cell = size / cols;
+  ctx.fillStyle = color;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      if (HEART_PIXELS[row][col] !== '#') continue;
+      ctx.fillRect(x - size / 2 + col * cell, y - size / 2 + row * cell, cell, cell);
+    }
+  }
+}
+
+
 function drawDoor(ctx: CanvasRenderingContext2D, placement: DoorPlacement) {
   const { x, y, w, h } = placement;
   ctx.fillStyle = '#4a2f1c';
@@ -664,8 +771,21 @@ export class HomeSim {
   bowl = createBowl(250, 325);
   pup = createPup(180, 450);
   bag: FoodBagState | null = null;
-  private bagParticles: Particle[] = [];
+  brushTool: BrushToolState | null = null;
+  petting = false;
+  petCaption = "";
+  private readonly PET_CAPTIONS = [
+    "Sol leans into your leg.",
+    "Sol wags his tail happily.",
+    "Sol rolls over for belly rubs.",
+    "Sol nuzzles your hand.",
+    "Sol's ears perk up at your touch.",
+  ];
+  soapCount = 3; // Placeholder - until market and inventory
+  private particles: Particle[] = [];
   private bagParticleAcc = 0;
+  private brushParticleAcc = 0;
+  private heartSlotIndex = 0;
   pointer = { down: false, x: 0, y: 0 }
   lastPointer = { x: 0, y: 0, t: 0 }
   style: HomeStyle = { wall: 'indigo', floor: 'walnut-plank', trim: 'white', windowFrame: 'white', outside: 'day' };
@@ -673,16 +793,19 @@ export class HomeSim {
   // dragged too low into (or past) the floor line — something like
   // `p.y + p.h <= wallSplitY() - MIN_WINDOW_MARGIN`.
   windowPlacement: WindowPlacement = { x: 130, y: 60, w: 100, h: 80 };
-  camera = { x: 0 };
+  camera = { x: 0, y: 0 };
   cameraFollow = true;
   zoom = 1;
+  closeUpTarget: { x: number; y: number } | null = null;
   private zoomTarget = 1;
-  private wasFeeding = false;
+  private wasCloseUp = false;
   private isPanningCamera = false;
+  private wiggleTime = 0;
   private panStartPointerX = 0;
   private panStartCameraX = 0;
   door: DoorPlacement = { x: HOME_WORLD_W - 140, y: wallSplitY() - 148, w: 70, h: 160 };
   onDoorTapped: (() => void) | null = null;
+  onPupTapped: (() => void) | null = null;
   onFed: (() => void) | null = null;
   // Set by HomeScreen to `() => Date.now() < game.regenBuffUntil` — lets the
   // pup's hunger gating read the SAME "Well Fed" timer without home.ts ever
@@ -709,7 +832,7 @@ export class HomeSim {
 
   constructor() {
     for (let i = 0; i < BAG_PARTICLE_CAP; i++) {
-      this.bagParticles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, size: 2, color: '#caa24a', alive: false });
+      this.particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, size: 2, color: '#caa24a', alive: false });
     }
     this.loadSave();
   }
@@ -851,9 +974,31 @@ export class HomeSim {
     return Math.max(0, Math.min(HOME_WORLD_W - HOME_W, x));
   }
 
+  private clampCameraY(y: number): number {
+    const maxY = Math.max(0, HOME_H - HOME_H / this.zoom);
+    return Math.max(0, Math.min(maxY, y));
+  }
+
   lockCameraToPup() {
     this.cameraFollow = true;
   }
+
+  startBrushing() {
+    if (!canBrush(this.pup)) return; // 
+    this.brushTool = createBrushTool(this.pup.x, this.pup.y);
+    this.pup.anim = 'idle';
+  }
+
+  startPetting() {
+    this.petting = true;
+    this.petCaption = this.PET_CAPTIONS[Math.floor(Math.random() * this.PET_CAPTIONS.length)];
+    this.pup.anim = 'idle';
+  }
+
+  stopPetting() {
+    this.petting = false;
+  }
+
 
   // Inverse of draw()'s transform (translate(W/2,H/2) → scale(zoom) →
   // translate(-W/2-camera.x, -H/2)). Needed so hit-testing and the bag's
@@ -862,52 +1007,121 @@ export class HomeSim {
   private toWorld(vx: number, vy: number) {
     return {
       x: (vx - HOME_W / 2) / this.zoom + HOME_W / 2 + this.camera.x,
-      y: (vy - HOME_H / 2) / this.zoom + HOME_H / 2,
+      y: (vy - HOME_H / 2) / this.zoom + HOME_H / 2 + this.camera.y,
     };
   }
 
-  private spawnBagParticle(bag: FoodBagState) {
-    for (const p of this.bagParticles) {
+  private spawnParticle(x: number, y: number, opts: { angle: number; speed: number; color: string; life: number; sizeMin?: number; sizeMax?: number; kind?: 'dust' | 'heart' }) {
+    for (const p of this.particles) {
       if (p.alive) continue;
       p.alive = true;
-      // The bag holds near -90° (see rotationDegrees), so its open end sits
-      // to the LEFT of its pivot point, not straight below it — shift the
-      // spawn point to match, rather than dropping particles from dead center.
-      p.x = bag.x - BAG_FRAME_H * BAG_SCALE * 0.35;
-      p.y = bag.y + BAG_FRAME_H * BAG_SCALE * 0.15;
-      const angle = Math.PI / 2 + (Math.random() - 0.5) * 0.6; // mostly downward, slight spread
-      const speed = 20 + Math.random() * 30;
-      p.vx = Math.cos(angle) * speed * 0.4;
-      p.vy = Math.sin(angle) * speed;
-      p.size = 1.5 + Math.random() * 2.5; // varying sizes, as requested
-      p.life = 0.5 + Math.random() * 0.4;
-      p.max = p.life;
-      p.color = Math.random() < 0.5 ? '#caa24a' : '#8a6a2f';
-      return; // one slot per call — tick() calls this in a loop for the spawn rate
+      p.x = x;
+      p.y = y;
+      p.vx = Math.cos(opts.angle) * opts.speed;
+      p.vy = Math.sin(opts.angle) * opts.speed;
+      const sizeMin = opts.sizeMin ?? 1.5;
+      const sizeMax = opts.sizeMax ?? 4;
+      const kind = opts.kind ?? 'dust';
+      const rolledSize = sizeMin + Math.random() * (sizeMax - sizeMin);
+      if (kind === 'heart') {
+        p.targetSize = rolledSize;
+        p.size = 1; // start small, grow to targetSize over the first half of its life
+      } else {
+        p.size = rolledSize;
+        p.targetSize = rolledSize;
+      }
+      p.life = opts.life;
+      p.max = opts.life;
+      p.color = opts.color;
+      p.kind = kind;
+      return;
     }
   }
 
-  private tickBagParticles(step: number) {
+
+
+
+  private tickParticles(step: number) {
     if (this.bag?.isShaking) {
       this.bagParticleAcc += step;
       while (this.bagParticleAcc >= BAG_PARTICLE_RATE) {
         this.bagParticleAcc -= BAG_PARTICLE_RATE;
-        this.spawnBagParticle(this.bag);
+        const bag = this.bag;
+        const x = bag.x - BAG_FRAME_H * BAG_SCALE * 0.35;
+        const y = bag.y + BAG_FRAME_H * BAG_SCALE * 0.15;
+        const angle = Math.PI / 2 + (Math.random() - 0.5) * 0.6;
+        const speed = 20 + Math.random() * 30;
+        const color = Math.random() < 0.5 ? '#caa24a' : '#8a6a2f';
+        this.spawnParticle(x, y, { angle, speed, color, life: 0.5 + Math.random() * 0.4 });
       }
     }
-    for (const p of this.bagParticles) {
+
+    if (this.brushTool?.isBrushing) {
+      this.brushParticleAcc += step;
+      while (this.brushParticleAcc >= BAG_PARTICLE_RATE) {
+        this.brushParticleAcc -= BAG_PARTICLE_RATE;
+        const angle = Math.random() * Math.PI * 2; // light dust, scattering in any direction
+        const speed = 10 + Math.random() * 15;
+        this.spawnParticle(this.brushTool.x, this.brushTool.y, {
+          angle, speed, color: '#d8d6cc', life: 0.3 + Math.random() * 0.2,
+        });
+      }
+    }
+
+    const MAX_HEARTS = 6;
+    const HEART_HEAD_OFFSET_X = 25; // roughly where the head sits relative to pup.x, at this sprite scale — nudge by eye
+    const HEART_SLOT_OFFSETS = [-18, -6, 6,]
+
+    if (this.petting && this.pointer.down) {
+      this.brushParticleAcc += step;
+      while (this.brushParticleAcc >= HEART_PARTICLE_RATE) {
+        this.brushParticleAcc -= HEART_PARTICLE_RATE;
+        let aliveHearts = 0;
+        for (const p of this.particles) if (p.alive && p.kind === 'heart') aliveHearts++;
+        if (aliveHearts >= MAX_HEARTS) continue;
+        const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.6;
+        const speed = 6 + Math.random() * 6;
+        const headX = this.pup.x + (this.pup.facingRight ? HEART_HEAD_OFFSET_X : -HEART_HEAD_OFFSET_X);
+        const slotOffset = HEART_SLOT_OFFSETS[this.heartSlotIndex % HEART_SLOT_OFFSETS.length];
+        this.heartSlotIndex++;
+        const spawnX = headX + slotOffset + (Math.random() - 0.5) * 6;
+        const spawnY = this.pup.y - 55 + (Math.random() - 0.5) * 10;
+
+        this.spawnParticle(spawnX, spawnY, {
+          angle, speed, color: '#ff6b81', life: 5, sizeMin: 6, sizeMax: 14, kind: 'heart',
+        });
+      }
+    }
+
+    for (const p of this.particles) {
       if (!p.alive) continue;
       p.life -= step;
       p.x += p.vx * step;
       p.y += p.vy * step;
-      p.vy += 80 * step; // gravity — same constant SpiritGame's particles use
+      if (p.kind !== 'heart') {
+        p.vy += 80 * step; // gravity — same constant SpiritGame's particles use
+      }
+      if (p.kind === 'heart' && p.targetSize !== undefined) {
+        const progress = 1 - p.life / p.max;
+        const growthProgress = Math.min(1, progress / HEART_GROWTH_FRACTION);
+        p.size = 1 + (p.targetSize - 1) * growthProgress;
+      }
       if (p.life <= 0) p.alive = false;
     }
+
   }
 
   tick(dt: number) {
     const step = Math.min(dt, 0.1); // safety clamp
     this.time += step; // running clock, used for animations
+
+    if (this.bag) {
+      this.closeUpTarget = { x: this.bowl.x, y: this.bowl.y };
+    } else if (this.brushTool || this.petting) {
+      this.closeUpTarget = { x: this.pup.x, y: this.pup.y };
+    } else if (this.wasCloseUp) {
+      this.closeUpTarget = null;
+    }
 
     if (this.bag) {
       const elapsedMs = this.time * 1000;
@@ -919,28 +1133,46 @@ export class HomeSim {
       this.lastPointer = { x: this.pointer.x, y: this.pointer.y, t: elapsedMs };
       if (done) this.bag = null;
     }
-    this.tickBagParticles(step);
+
+    if (this.brushTool) {
+      const elapsedMs = this.time * 1000;
+      const done = updateBrushTool(
+        this.brushTool, this.pointer.down, this.pointer.x, this.pointer.y,
+        step, elapsedMs, this.lastPointer,
+        () => {
+          applyBrushBuff(this.pup);
+          this.hudDirty = true;
+        }
+      );
+      this.lastPointer = { x: this.pointer.x, y: this.pointer.y, t: elapsedMs };
+      if (done) this.brushTool = null;
+    }
+
+    this.tickParticles(step);
 
     const hungry = !(this.isWellFed?.() ?? false); // no wiring yet (isWellFed null) → treat as hungry, same as before
-    updatePup(this.pup, this.bowl, step, hungry);
+    if (!this.brushTool && !this.petting) {
+      updatePup(this.pup, this.bowl, step, hungry);
+    }
 
-    // Feeding always takes over the camera — pan+zoom onto the bowl while a
-    // bag exists, then hand control back (resume following the pup) the
-    // instant feeding ends, regardless of whether the player had manually
-    // panned away beforehand.
-    const feeding = Boolean(this.bag);
-    if (this.wasFeeding && !feeding) this.cameraFollow = true;
-    this.wasFeeding = feeding;
+    const closeUp = this.closeUpTarget !== null;
+    if (this.wasCloseUp && !closeUp) this.cameraFollow = true;
+    this.wasCloseUp = closeUp;
 
-    this.zoomTarget = feeding ? FEED_ZOOM : 1;
+    this.zoomTarget = closeUp ? FEED_ZOOM : 1;
     this.zoom += (this.zoomTarget - this.zoom) * Math.min(1, ZOOM_EASE * step);
 
-    if (feeding) {
-      const target = this.clampCameraX(this.bowl.x - HOME_W / 2);
-      this.camera.x += (target - this.camera.x) * Math.min(1, CAMERA_EASE * step);
-    } else if (this.cameraFollow) {
-      const target = this.clampCameraX(this.pup.x - HOME_W / 2);
-      this.camera.x += (target - this.camera.x) * Math.min(1, CAMERA_EASE * step); // ease toward the pup
+    if (closeUp && this.closeUpTarget) {
+      const targetX = this.clampCameraX(this.closeUpTarget.x - HOME_W / 2);
+      const targetY = this.clampCameraY(this.closeUpTarget.y - HOME_H / 2);
+      this.camera.x += (targetX - this.camera.x) * Math.min(1, CAMERA_EASE * step);
+      this.camera.y += (targetY - this.camera.y) * Math.min(1, CAMERA_EASE * step);
+    } else {
+      this.camera.y += (0 - this.camera.y) * Math.min(1, CAMERA_EASE * step); // normal view never pans vertically
+      if (this.cameraFollow) {
+        const targetX = this.clampCameraX(this.pup.x - HOME_W / 2);
+        this.camera.x += (targetX - this.camera.x) * Math.min(1, CAMERA_EASE * step);
+      }
     }
 
     tickBowl(this.bowl, step, () => {
@@ -964,6 +1196,16 @@ export class HomeSim {
     return x >= this.door.x && x <= this.door.x + this.door.w && y >= this.door.y && y <= this.door.y + this.door.h;
   }
 
+  private hitPup(x: number, y: number) {
+    const halfW = 30;    // roughly the pup's real body width, not the whole sprite cell
+    const headroom = 50; // how far above his feet (pup.y) the box reaches
+    const pad = 10;
+    return (
+      x >= this.pup.x - halfW - pad && x <= this.pup.x + halfW + pad &&
+      y >= this.pup.y - headroom - pad && y <= this.pup.y + pad
+    );
+  }
+
 
   pointerDown(x: number, y: number) {
     const { x: wx, y: wy } = this.toWorld(x, y); // viewport → world, at this one boundary
@@ -973,6 +1215,22 @@ export class HomeSim {
       return;
     }
 
+    if (this.brushTool || this.petting) {
+      this.pointer = { down: true, x: wx, y: wy };
+      this.lastPointer = { x: wx, y: wy, t: this.time * 1000 };
+      return;
+    }
+
+    if (this.petting) {
+      if (this.hitPup(wx, wy)) {
+        this.pointer = { down: true, x: wx, y: wy };
+      } else {
+        this.stopPetting(); // tapped away from him — that's how you leave petting mode now
+      }
+      return;
+    }
+
+
     const grabbing = this.bag
       ? Math.hypot(wx - this.bag.x, wy - this.bag.y) < 50 || this.hitBowl(wx, wy)
       : this.bowl.state === 'empty' && this.hitBowl(wx, wy);
@@ -981,6 +1239,11 @@ export class HomeSim {
       this.pointer = { down: true, x: wx, y: wy };
       if (!this.bag) this.bag = createFoodBag(wx, wy);
       this.lastPointer = { x: wx, y: wy, t: this.time * 1000 };
+      return;
+    }
+
+    if (!this.bag && this.hitPup(wx, wy)) {
+      this.onPupTapped?.();
       return;
     }
 
@@ -1007,8 +1270,6 @@ export class HomeSim {
     this.pointer.down = false;
   }
 
-
-
   loadSprites() {
     return Promise.all([
       loadImage("/sprites/bowl.png"),
@@ -1034,7 +1295,7 @@ export class HomeSim {
     // so nothing about normal (non-feeding) panning changes.
     ctx.translate(HOME_W / 2, HOME_H / 2);
     ctx.scale(this.zoom, this.zoom);
-    ctx.translate(-HOME_W / 2 - this.camera.x, -HOME_H / 2);
+    ctx.translate(-HOME_W / 2 - this.camera.x, -HOME_H / 2 - this.camera.y);
 
     const splitY = wallSplitY();
     drawWall(ctx, this.style.wall, splitY);
@@ -1042,7 +1303,8 @@ export class HomeSim {
     drawWindow(ctx, this.windowPlacement, this.style.outside, this.style.windowFrame, HOME_WORLD_W, splitY);
     drawTrim(ctx, this.style.trim, splitY, trimHeight());
     drawDoor(ctx, this.door);
-    
+
+
 
     if (this.bowlImg) {
       const frame =
@@ -1071,6 +1333,7 @@ export class HomeSim {
       ctx.save();
       ctx.translate(pup.x, pup.y - edh / 2);
       if (pup.facingRight) ctx.scale(-1, 1);
+      if (this.petting) ctx.rotate(Math.sin(this.wiggleTime * 12) * 0.08);
       ctx.drawImage(this.eatImg, eatFrame * EAT_FRAME_W, 0, EAT_FRAME_W, EAT_FRAME_H, -edw / 2, -edh / 2, edw, edh);
       ctx.restore();
     } else {
@@ -1108,13 +1371,23 @@ export class HomeSim {
       ctx.restore();
     }
 
-    for (const p of this.bagParticles) {
+    for (const p of this.particles) {
       if (!p.alive) continue;
-      ctx.globalAlpha = Math.max(0, p.life / p.max);
-      ctx.fillStyle = p.color;
-      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      if (p.kind === 'heart') {
+        const progress = 1 - p.life / p.max;
+        // fully solid while growing; only fades during the remaining time AFTER it's full-size
+        const fadeProgress = progress <= HEART_GROWTH_FRACTION ? 0 : (progress - HEART_GROWTH_FRACTION) / (1 - HEART_GROWTH_FRACTION);
+        ctx.globalAlpha = Math.max(0, 1 - fadeProgress);
+        drawPixelHeart(ctx, p.x, p.y, p.size, p.color);
+      } else {
+        ctx.globalAlpha = Math.max(0, p.life / p.max);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      }
     }
     ctx.globalAlpha = 1;
+
+
 
     const DEBUG = false;  // Delete later
     if (DEBUG) {
@@ -1123,9 +1396,9 @@ export class HomeSim {
       ctx.fillStyle = "yellow";
       ctx.fillRect(this.bowl.x - 2, this.bowl.y - 2, 4, 4);
     }
-    
+
     ctx.restore();
-  
+
   }
 
 }
