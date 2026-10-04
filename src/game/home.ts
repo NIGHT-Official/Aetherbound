@@ -99,6 +99,9 @@ export interface PupState {
   brushTier: number;    // 0 = base brush; unused, stub for future market item
   washBuffUntil: number;    // epoch ms
   washCooldownUntil: number;    // epoch ms - separate from washBuffUntil on purpose
+  soapTier: number;     // 0 = base soap; unused, stub for future market item
+  washBuffMagnitude: number;   // 0.0-1.0, how much the wash buff is currently boosting regen
+  soapStyle: SoapStyle; // cosmetic effect for the wash buff, based on the soap tier
 }
 
 
@@ -117,6 +120,13 @@ const BRUSH_TIER_BONUS_MS = 0; // stub: future brush tiers add time here
 const WASH_BUFF_DURATION_MS = 12 * 3600_000; // 12h
 const WASH_COOLDOWN_MS = 24 * 3600_000; // 24h, deliberately different
 
+export type SoapStyle = 'none' | 'sparkle' | 'lightning' | 'bubbles' | 'ice' | 'fire' | 'water' | 'earth';
+
+// Index = soap tier. Only tier 0 ("Clean") is reachable until the Market
+// exists — tiers 1/2 ("Spotless"/"Radiant") are stubbed in now so a future
+// better-soap item just needs to raise washTier, nothing here has to change.
+const SOAP_ECHO_RATE_BY_TIER = [0.05, 0.08, 0.12];
+
 
 export function createPup(x: number, y: number): PupState {
   return {
@@ -133,6 +143,9 @@ export function createPup(x: number, y: number): PupState {
     brushTier: 0,
     washBuffUntil: 0,
     washCooldownUntil: 0,
+    soapTier: 0,
+    washBuffMagnitude: 0,
+    soapStyle: 'none'
   };
 }
 
@@ -149,9 +162,11 @@ export function canWash(pup: PupState, soapCount: number): boolean {
   return soapCount > 0 && Date.now() >= pup.washCooldownUntil;
 }
 
-export function applyWashBuff(pup: PupState) {
+export function applyWashBuff(pup: PupState, style: SoapStyle) {
   pup.washBuffUntil = Date.now() + WASH_BUFF_DURATION_MS;
   pup.washCooldownUntil = Date.now() + WASH_COOLDOWN_MS;
+  pup.washBuffMagnitude = SOAP_ECHO_RATE_BY_TIER[pup.soapTier] ?? SOAP_ECHO_RATE_BY_TIER[0];
+  pup.soapStyle = style;
 }
 
 /**
@@ -289,16 +304,6 @@ function pickNewWanderState(pup: PupState) {
   }
 }
 
-export interface FoodBagState {
-  x: number;
-  y: number;
-  rotationDegrees: number;
-  isShaking: boolean;
-  shakeTimer: number;
-  targetTime: number;
-  particlesEmitting: boolean;
-}
-
 export interface BrushToolState {
   x: number;
   y: number;
@@ -307,23 +312,8 @@ export interface BrushToolState {
   targetTime: number;
 }
 
-const SHAKE_VELOCITY_THRESHOLD = 100; // px/sec, matches the old Godot threshold
-const TARGET_SHAKE_TIME = 2.0;        // seconds of actual shaking needed to finish
-
 const BRUSH_VELOCITY_THRESHOLD = 60; // px/sec - gentler than food bag shake, since brushing is a more delicate motion
 const BRUSH_TARGET_TIME = 1.5;        // seconds of actual brushing needed to finish
-
-
-export function createFoodBag(x: number, y: number): FoodBagState {
-  return {
-    x, y,
-    rotationDegrees: -90,
-    isShaking: false,
-    shakeTimer: 0,
-    targetTime: TARGET_SHAKE_TIME,
-    particlesEmitting: false,
-  };
-}
 
 export function createBrushTool(x: number, y: number): BrushToolState {
   return {
@@ -365,6 +355,124 @@ export function updateBrushTool(
     return true; // caller removes this tool from its entity list
   }
   return false;
+}
+
+export interface WashToolState {
+  x: number;
+  y: number;
+  phase: 'lather' | 'rinse';     // add this
+  totalSweepDeg: number;
+  targetSweepDeg: number;
+  lastAngle: number | null;
+  rinseTimer: number;
+  targetRinseTime: number;
+  shookOff: boolean;
+}
+
+
+const WASH_SWEEP_VELOCITY_MIN = 20; // deg/sec — below this, it doesn't count as "scrubbing," just resting the pointer
+const WASH_TARGET_SWEEP_DEG = 1440;  // two full circles' worth of total rotation to finish
+const WASH_RINSE_TIME = 2.5;
+const WASH_SHAKE_OFF_AT = WASH_RINSE_TIME - 0.4;
+
+export function createWashTool(x: number, y: number): WashToolState {
+  return {
+    x, y,
+    phase: 'lather',
+    totalSweepDeg: 0, targetSweepDeg: WASH_TARGET_SWEEP_DEG, lastAngle: null,
+    rinseTimer: 0, targetRinseTime: WASH_RINSE_TIME, shookOff: false,
+  };
+}
+
+
+export function updateWashTool(
+  tool: WashToolState,
+  pivotX: number,
+  pivotY: number,
+  pointerDown: boolean,
+  pointerX: number,
+  pointerY: number,
+  deltaTime: number,
+  onComplete: () => void
+): boolean {
+  if (tool.phase === 'lather') {
+    if (pointerDown) {
+      tool.x = pointerX;
+      tool.y = pointerY;
+
+      const radius = Math.hypot(pointerX - pivotX, pointerY - pivotY);
+      if (radius < 20) {
+        tool.lastAngle = null; // too close to center — angle math gets noisy/exaggerated here, so just skip this frame
+      } else {
+        const angle = Math.atan2(pointerY - pivotY, pointerX - pivotX);
+
+        if (tool.lastAngle !== null) {
+          let delta = angle - tool.lastAngle;
+          if (delta > Math.PI) delta -= Math.PI * 2;
+          if (delta < -Math.PI) delta += Math.PI * 2;
+
+          const deltaDeg = Math.abs(delta) * (180 / Math.PI);
+          const velocityDegPerSec = deltaDeg / Math.max(deltaTime, 1 / 1000);
+
+          if (velocityDegPerSec > WASH_SWEEP_VELOCITY_MIN) {
+            tool.totalSweepDeg += deltaDeg;
+          }
+        }
+        tool.lastAngle = angle;
+      }
+    } else {
+      tool.lastAngle = null;
+    }
+
+
+    if (tool.totalSweepDeg >= tool.targetSweepDeg) {
+      tool.phase = 'rinse'; // lather's done — switch to the simpler rinse phase
+    }
+    return false;
+  }
+
+  // phase === 'rinse': no gesture math needed, just hold
+  if (pointerDown) {
+    tool.x = pointerX;
+    tool.y = pointerY;
+    tool.rinseTimer += deltaTime;
+    if (!tool.shookOff && tool.rinseTimer >= WASH_SHAKE_OFF_AT) {
+      tool.shookOff = true; // the caller can check this flag to trigger the one-time flavor animation
+    }
+  }
+
+  if (tool.rinseTimer >= tool.targetRinseTime) {
+    onComplete();
+    return true;
+  }
+  return false;
+}
+
+
+
+
+export interface FoodBagState {
+  x: number;
+  y: number;
+  rotationDegrees: number;
+  isShaking: boolean;
+  shakeTimer: number;
+  targetTime: number;
+  particlesEmitting: boolean;
+}
+
+const SHAKE_VELOCITY_THRESHOLD = 100; // px/sec, matches the old Godot threshold
+const TARGET_SHAKE_TIME = 1;        // seconds of actual shaking needed to finish
+
+export function createFoodBag(x: number, y: number): FoodBagState {
+  return {
+    x, y,
+    rotationDegrees: -90,
+    isShaking: false,
+    shakeTimer: 0,
+    targetTime: TARGET_SHAKE_TIME,
+    particlesEmitting: false,
+  };
 }
 
 /**
@@ -772,6 +880,7 @@ export class HomeSim {
   pup = createPup(180, 450);
   bag: FoodBagState | null = null;
   brushTool: BrushToolState | null = null;
+  washTool: WashToolState | null = null;
   petting = false;
   petCaption = "";
   private readonly PET_CAPTIONS = [
@@ -785,6 +894,7 @@ export class HomeSim {
   private particles: Particle[] = [];
   private bagParticleAcc = 0;
   private brushParticleAcc = 0;
+  private pettingDustAcc = 0;
   private heartSlotIndex = 0;
   pointer = { down: false, x: 0, y: 0 }
   lastPointer = { x: 0, y: 0, t: 0 }
@@ -989,6 +1099,17 @@ export class HomeSim {
     this.pup.anim = 'idle';
   }
 
+  startWashing() {
+    this.washTool = createWashTool(96, 96);
+  }
+
+  completeWash(style: SoapStyle) {
+    this.soapCount -= 1;
+    applyWashBuff(this.pup, style);
+    this.washTool = null;
+  }
+
+
   startPetting() {
     this.petting = true;
     this.petCaption = this.PET_CAPTIONS[Math.floor(Math.random() * this.PET_CAPTIONS.length)];
@@ -1068,11 +1189,12 @@ export class HomeSim {
       }
     }
 
-    const MAX_HEARTS = 6;
+    const MAX_HEARTS = 5;
     const HEART_HEAD_OFFSET_X = 25; // roughly where the head sits relative to pup.x, at this sprite scale — nudge by eye
-    const HEART_SLOT_OFFSETS = [-18, -6, 6,]
+    const HEART_SLOT_OFFSETS = [-18, -10, -4, 0]
+    const overPup = this.hitPup(this.pointer.x, this.pointer.y);
 
-    if (this.petting && this.pointer.down) {
+    if (this.petting && this.pointer.down && overPup) {
       this.brushParticleAcc += step;
       while (this.brushParticleAcc >= HEART_PARTICLE_RATE) {
         this.brushParticleAcc -= HEART_PARTICLE_RATE;
@@ -1088,10 +1210,23 @@ export class HomeSim {
         const spawnY = this.pup.y - 55 + (Math.random() - 0.5) * 10;
 
         this.spawnParticle(spawnX, spawnY, {
-          angle, speed, color: '#ff6b81', life: 5, sizeMin: 6, sizeMax: 14, kind: 'heart',
+          angle, speed, color: '#ff6b81', life: 4, sizeMin: 6, sizeMax: 12, kind: 'heart',
         });
       }
     }
+
+    if (this.petting && this.pointer.down && overPup) {
+      this.pettingDustAcc += step;
+      while (this.pettingDustAcc >= BAG_PARTICLE_RATE) {
+        this.pettingDustAcc -= BAG_PARTICLE_RATE;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 10 + Math.random() * 15;
+        this.spawnParticle(this.pointer.x, this.pointer.y, {
+          angle, speed, color: '#d8d6cc', life: 0.3 + Math.random() * 0.2,
+        });
+      }
+    }
+
 
     for (const p of this.particles) {
       if (!p.alive) continue;
@@ -1151,7 +1286,7 @@ export class HomeSim {
     this.tickParticles(step);
 
     const hungry = !(this.isWellFed?.() ?? false); // no wiring yet (isWellFed null) → treat as hungry, same as before
-    if (!this.brushTool && !this.petting) {
+    if (!this.brushTool && !this.petting && !this.washTool) {
       updatePup(this.pup, this.bowl, step, hungry);
     }
 
@@ -1215,17 +1350,18 @@ export class HomeSim {
       return;
     }
 
-    if (this.brushTool || this.petting) {
+    if (this.brushTool) {
       this.pointer = { down: true, x: wx, y: wy };
       this.lastPointer = { x: wx, y: wy, t: this.time * 1000 };
       return;
     }
 
     if (this.petting) {
-      if (this.hitPup(wx, wy)) {
+      const distFromPup = Math.hypot(wx - this.pup.x, wy - this.pup.y);
+      if (distFromPup < 120) {
         this.pointer = { down: true, x: wx, y: wy };
       } else {
-        this.stopPetting(); // tapped away from him — that's how you leave petting mode now
+        this.stopPetting(); // tapped far enough away — that's how you leave petting mode
       }
       return;
     }
@@ -1320,86 +1456,87 @@ export class HomeSim {
     }
 
     const pup = this.pup;
-    if (pup.anim === 'eating' && this.eatImg) {
-      // pup-eating.png is 4 frames of 24x15 — a different native resolution
-      // than the 64x64 idle/walk cells, so it needs its own frame math
-      // rather than reusing PUP_CELL/PUP_CENTER_X/PUP_FEET_Y. The y-offset
-      // below (edh / 2) and EAT_SCALE are the two knobs to eyeball-tune.
-      const eatFrames = 4;
-      const eatFps = 6;
-      const eatFrame = Math.floor(this.time * eatFps) % eatFrames;
-      const edw = EAT_FRAME_W * EAT_SCALE;
-      const edh = EAT_FRAME_H * EAT_SCALE;
-      ctx.save();
-      ctx.translate(pup.x, pup.y - edh / 2);
-      if (pup.facingRight) ctx.scale(-1, 1);
-      if (this.petting) ctx.rotate(Math.sin(this.wiggleTime * 12) * 0.08);
-      ctx.drawImage(this.eatImg, eatFrame * EAT_FRAME_W, 0, EAT_FRAME_W, EAT_FRAME_H, -edw / 2, -edh / 2, edw, edh);
-      ctx.restore();
-    } else {
-      const walking = pup.anim === 'walk';
-      const sheet = walking ? this.walkImg : this.idleImg;
-      if (sheet) {
-        const frames = walking ? 4 : 12;
-        const fps = walking ? 8 : 6;
-        const frame = Math.floor(this.time * fps) % frames;
-        const dw = PUP_CELL * HOME_PUP_SCALE;
-        const dx = pup.x - PUP_CENTER_X * HOME_PUP_SCALE;
-        const dy = pup.y - PUP_FEET_Y * HOME_PUP_SCALE;
+    if (!this.washTool) {
+      if (pup.anim === 'eating' && this.eatImg) {
+        // pup-eating.png is 4 frames of 24x15 — a different native resolution
+        // than the 64x64 idle/walk cells, so it needs its own frame math
+        // rather than reusing PUP_CELL/PUP_CENTER_X/PUP_FEET_Y. The y-offset
+        // below (edh / 2) and EAT_SCALE are the two knobs to eyeball-tune.
+        const eatFrames = 4;
+        const eatFps = 6;
+        const eatFrame = Math.floor(this.time * eatFps) % eatFrames;
+        const edw = EAT_FRAME_W * EAT_SCALE;
+        const edh = EAT_FRAME_H * EAT_SCALE;
         ctx.save();
-        ctx.translate(dx + dw / 2, dy + dw / 2); // move the origin to the pup's center
-        if (pup.facingRight) ctx.scale(-1, 1); // mirror horizontally if facing left
-        ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, -dw / 2, -dw / 2, dw, dw);
-        ctx.restore(); // undo flip so the bowl and bag aren't mirrored
-      }
-    }
-
-    if (this.bagImg && this.bag) {
-      const bag = this.bag;
-      const frame = bag.isShaking ? Math.floor(this.time * 4) % 2 : 0;
-      const dw = BAG_FRAME_W * BAG_SCALE;
-      const dh = BAG_FRAME_H * BAG_SCALE;
-
-      ctx.save();
-      ctx.translate(bag.x, bag.y);                          // rotate around the bag's own point
-      ctx.rotate((bag.rotationDegrees * Math.PI) / 180);     // canvas rotation is radians, the state is degrees
-      ctx.drawImage(
-        this.bagImg,
-        frame * BAG_FRAME_W, 0, BAG_FRAME_W, BAG_FRAME_H,    // source: which of the 2 frames
-        -dw / 2, -dh / 2, dw, dh                              // destination: centered on the origin we translated to
-      );
-      ctx.restore();
-    }
-
-    for (const p of this.particles) {
-      if (!p.alive) continue;
-      if (p.kind === 'heart') {
-        const progress = 1 - p.life / p.max;
-        // fully solid while growing; only fades during the remaining time AFTER it's full-size
-        const fadeProgress = progress <= HEART_GROWTH_FRACTION ? 0 : (progress - HEART_GROWTH_FRACTION) / (1 - HEART_GROWTH_FRACTION);
-        ctx.globalAlpha = Math.max(0, 1 - fadeProgress);
-        drawPixelHeart(ctx, p.x, p.y, p.size, p.color);
+        ctx.translate(pup.x, pup.y - edh / 2);
+        if (pup.facingRight) ctx.scale(-1, 1);
+        if (this.petting) ctx.rotate(Math.sin(this.wiggleTime * 12) * 0.08);
+        ctx.drawImage(this.eatImg, eatFrame * EAT_FRAME_W, 0, EAT_FRAME_W, EAT_FRAME_H, -edw / 2, -edh / 2, edw, edh);
+        ctx.restore();
       } else {
-        ctx.globalAlpha = Math.max(0, p.life / p.max);
-        ctx.fillStyle = p.color;
-        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        const walking = pup.anim === 'walk';
+        const sheet = walking ? this.walkImg : this.idleImg;
+        if (sheet) {
+          const frames = walking ? 4 : 12;
+          const fps = walking ? 8 : 6;
+          const frame = Math.floor(this.time * fps) % frames;
+          const dw = PUP_CELL * HOME_PUP_SCALE;
+          const dx = pup.x - PUP_CENTER_X * HOME_PUP_SCALE;
+          const dy = pup.y - PUP_FEET_Y * HOME_PUP_SCALE;
+          ctx.save();
+          ctx.translate(dx + dw / 2, dy + dw / 2); // move the origin to the pup's center
+          if (pup.facingRight) ctx.scale(-1, 1); // mirror horizontally if facing left
+          ctx.drawImage(sheet, frame * PUP_CELL, 0, PUP_CELL, PUP_CELL, -dw / 2, -dw / 2, dw, dw);
+          ctx.restore(); // undo flip so the bowl and bag aren't mirrored
+        }
+      }
+
+      if (this.bagImg && this.bag) {
+        const bag = this.bag;
+        const frame = bag.isShaking ? Math.floor(this.time * 4) % 2 : 0;
+        const dw = BAG_FRAME_W * BAG_SCALE;
+        const dh = BAG_FRAME_H * BAG_SCALE;
+
+        ctx.save();
+        ctx.translate(bag.x, bag.y);                          // rotate around the bag's own point
+        ctx.rotate((bag.rotationDegrees * Math.PI) / 180);     // canvas rotation is radians, the state is degrees
+        ctx.drawImage(
+          this.bagImg,
+          frame * BAG_FRAME_W, 0, BAG_FRAME_W, BAG_FRAME_H,    // source: which of the 2 frames
+          -dw / 2, -dh / 2, dw, dh                              // destination: centered on the origin we translated to
+        );
+        ctx.restore();
+      }
+
+      for (const p of this.particles) {
+        if (!p.alive) continue;
+        if (p.kind === 'heart') {
+          const progress = 1 - p.life / p.max;
+          // fully solid while growing; only fades during the remaining time AFTER it's full-size
+          const fadeProgress = progress <= HEART_GROWTH_FRACTION ? 0 : (progress - HEART_GROWTH_FRACTION) / (1 - HEART_GROWTH_FRACTION);
+          ctx.globalAlpha = Math.max(0, 1 - fadeProgress);
+          drawPixelHeart(ctx, p.x, p.y, p.size, p.color);
+        } else {
+          ctx.globalAlpha = Math.max(0, p.life / p.max);
+          ctx.fillStyle = p.color;
+          ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        }
+      }
+      ctx.globalAlpha = 1;
+
+
+
+      const DEBUG = false;  // Delete later
+      if (DEBUG) {
+        ctx.strokeStyle = "red";
+        ctx.strokeRect(FENCE.minX, FENCE.minY, FENCE.maxX - FENCE.minX, FENCE.maxY - FENCE.minY);
+        ctx.fillStyle = "yellow";
+        ctx.fillRect(this.bowl.x - 2, this.bowl.y - 2, 4, 4);
       }
     }
-    ctx.globalAlpha = 1;
+      ctx.restore();
 
-
-
-    const DEBUG = false;  // Delete later
-    if (DEBUG) {
-      ctx.strokeStyle = "red";
-      ctx.strokeRect(FENCE.minX, FENCE.minY, FENCE.maxX - FENCE.minX, FENCE.maxY - FENCE.minY);
-      ctx.fillStyle = "yellow";
-      ctx.fillRect(this.bowl.x - 2, this.bowl.y - 2, 4, 4);
     }
-
-    ctx.restore();
 
   }
-
-}
 
